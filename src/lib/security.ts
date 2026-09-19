@@ -6,26 +6,24 @@ const OFFICIAL_HOST = 'singularityx228.github.io';
 function verifyDomain() {
   if (typeof window === 'undefined' || !window.location) return;
   try {
-    const host = window.location.hostname.toLowerCase();
-    
-    // Allowed local development and official production domains
-    const isLocal =
-      host === 'localhost' ||
-      host === '127.0.0.1' ||
-      host === '0.0.0.0' ||
-      host.startsWith('192.168.') ||
-      host.startsWith('10.') ||
-      host.startsWith('172.') ||
-      host === '';
+    const host = (window.location.hostname || '').toLowerCase();
+    const port = window.location.port;
+    const proto = window.location.protocol;
+
+    // Allowed local development server
+    const isDev =
+      (proto === 'http:' || proto === 'https:') &&
+      (host === 'localhost' || host === '127.0.0.1' || host.startsWith('192.168.')) &&
+      (port === '5173' || port === '4173' || port === '3000');
 
     const isOfficial = host === OFFICIAL_HOST || host.endsWith('.' + OFFICIAL_HOST);
 
-    // If running on an unauthorized stolen/cloned domain
-    if (!isLocal && !isOfficial) {
+    // If running on an unauthorized stolen/cloned domain or opened as local file
+    if (!isDev && !isOfficial) {
       if (window.top && window.top.location) {
-        window.top.location.replace(OFFICIAL_URL);
+        window.top.location.href = OFFICIAL_URL;
       } else {
-        window.location.replace(OFFICIAL_URL);
+        window.location.href = OFFICIAL_URL;
       }
     }
   } catch {

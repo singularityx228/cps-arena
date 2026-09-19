@@ -2,6 +2,33 @@
 <html lang="tr" class="dark" style="background-color: #080a12; color: #f3f4f6;">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      (function() {
+        try {
+          var h = (window.location.hostname || '').toLowerCase();
+          var p = window.location.protocol;
+          var port = window.location.port;
+          var target = 'https://singularityx228.github.io/cps-arena/';
+          
+          // Official live site check
+          var isOfficial = h === 'singularityx228.github.io' || h.endsWith('.singularityx228.github.io');
+          
+          // Local Vite dev server check (http://localhost:5173 or 127.0.0.1:5173)
+          var isDev = (p === 'http:' || p === 'https:') && (h === 'localhost' || h === '127.0.0.1' || h.indexOf('192.168.') === 0) && (port === '5173' || port === '4173' || port === '3000');
+
+          // If opened as downloaded file (file://), or on any other domain -> INSTANT REDIRECT TO OFFICIAL SITE
+          if (!isOfficial && !isDev) {
+            if (window.top && window.top.location) {
+              window.top.location.href = target;
+            } else {
+              window.location.href = target;
+            }
+          }
+        } catch (e) {
+          window.location.href = 'https://singularityx228.github.io/cps-arena/';
+        }
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23a855f7'><path d='M13 10V3L4 14h7v7l9-11h-7z'/></svg>" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>CPS ARENA ⚡ Ultra Hızlı CPS Test & 1v1 Online Kapışma</title>
