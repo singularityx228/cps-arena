@@ -130,15 +130,71 @@ export function initSecurityGuards() {
   // 3. Block Dragging & Text Selection on UI
   document.addEventListener('dragstart', (e) => e.preventDefault(), true);
 
-  // 4. Anti-Debugging / Console Protection Loop
-  try {
-    setInterval(() => {
-      // Clear console continuously in production
-      if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+  // 4. Active DevTools Detection & Anti-Debugging Freeze Engine
+  const isDev =
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1' ||
+    window.location.hostname.startsWith('192.168.');
+
+  if (!isDev) {
+    const triggerAntiDebug = () => {
+      try {
+        (function () {
+          return false;
+        })
+          ['constructor']('debugger')
+          ['call']();
+      } catch {}
+    };
+
+    const onDevToolsDetected = () => {
+      try {
         console.clear();
+      } catch {}
+      triggerAntiDebug();
+    };
+
+    // Trap 1: Console Element Getter Inspection
+    try {
+      const el = document.createElement('div');
+      Object.defineProperty(el, 'id', {
+        get: () => {
+          onDevToolsDetected();
+          return '';
+        },
+      });
+      setInterval(() => {
+        console.log('%c', el);
+        console.clear();
+      }, 1000);
+    } catch {}
+
+    // Trap 2: Window Outer / Inner Dimension Differential
+    const checkDimensions = () => {
+      const wDiff = window.outerWidth - window.innerWidth;
+      const hDiff = window.outerHeight - window.innerHeight;
+      if (wDiff > 160 || hDiff > 160) {
+        onDevToolsDetected();
+      }
+    };
+    window.addEventListener('resize', checkDimensions);
+    setInterval(checkDimensions, 1000);
+
+    // Trap 3: Debugger Timing Delta Trap
+    setInterval(() => {
+      const t0 = performance.now();
+      triggerAntiDebug();
+      const t1 = performance.now();
+      if (t1 - t0 > 100) {
+        onDevToolsDetected();
       }
     }, 1500);
-  } catch {
-    // ignore
+
+    // Trap 4: Window Focus / Blur Re-check
+    window.addEventListener('focus', () => {
+      checkDimensions();
+      triggerAntiDebug();
+    });
   }
 }
+

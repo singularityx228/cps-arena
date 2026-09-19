@@ -19,6 +19,8 @@ function customObfuscatorPlugin() {
               controlFlowFlattening: true,
               controlFlowFlatteningThreshold: 0.3,
               deadCodeInjection: false,
+              debugProtection: true,
+              debugProtectionInterval: 2000,
               stringArray: true,
               stringArrayEncoding: ['base64'],
               stringArrayThreshold: 0.75,
