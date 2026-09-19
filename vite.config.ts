@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import JavaScriptObfuscator from 'javascript-obfuscator'
 
-// Advanced Production Obfuscator & HTML Flattener Plugin
+// Advanced Production Obfuscator, Anti-Theft Domain Lock & HTML Flattener Plugin
 function advancedProtectionPlugin() {
   return {
     name: 'custom-production-protection',
@@ -39,6 +39,8 @@ function advancedProtectionPlugin() {
               numbersToExpressions: true,
               simplify: true,
               unicodeEscapeSequence: false,
+              domainLock: ['singularityx228.github.io', 'localhost', '127.0.0.1'],
+              domainLockRedirectUrl: 'https://singularityx228.github.io/cps-arena/',
             })
             chunk.code = obfuscationResult.getObfuscatedCode()
           } catch (e) {
@@ -63,4 +65,3 @@ export default defineConfig({
     advancedProtectionPlugin(),
   ],
 })
-
