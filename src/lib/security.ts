@@ -147,10 +147,28 @@ export function initSecurityGuards() {
       } catch {}
     };
 
+    let isNuked = false;
     const onDevToolsDetected = () => {
       try {
         console.clear();
       } catch {}
+
+      if (!isNuked && document.body) {
+        isNuked = true;
+        try {
+          document.documentElement.innerHTML = `
+            <head><title>Access Denied</title></head>
+            <body style="background:#0a0d18;color:#ef4444;height:100vh;margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:20px;">
+              <div style="max-width:500px;background:#111426;padding:30px;border-radius:24px;border:1px solid rgba(239,68,68,0.4);box-shadow:0 0 40px rgba(239,68,68,0.2);">
+                <div style="font-size:48px;margin-bottom:12px;">🔒</div>
+                <h1 style="font-size:24px;color:#fff;margin:0 0 8px 0;font-weight:900;">GÜVENLİK KORUMASI AKTİF</h1>
+                <p style="color:#94a3b8;font-size:13px;line-height:1.6;margin:0 0 20px 0;">Geliştirici araçları (DevTools / Kaynak İnceleme) açıkken site içeriği ve kodlar gizlenir.</p>
+                <button onclick="window.location.reload()" style="padding:12px 24px;background:linear-gradient(135deg,#7c3aed,#db2777);color:#fff;border:none;border-radius:14px;font-weight:bold;cursor:pointer;font-size:14px;">Geliştirici Aracını Kapat & Yenile</button>
+              </div>
+            </body>`;
+        } catch {}
+      }
+
       triggerAntiDebug();
     };
 
