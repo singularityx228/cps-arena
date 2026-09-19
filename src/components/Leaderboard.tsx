@@ -1,72 +1,102 @@
-import React, { useState, useEffect } from 'react';
-import { Trophy, Clock, History } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Trophy, Clock, History, RefreshCw, Zap, Flame, Crown, Award } from 'lucide-react';
 import type { UserProfile, SoloScoreRecord } from '../types';
 import { getEvaluation } from '../types';
-import { getSoloHistory } from '../lib/storage';
+import { getSoloHistory, getCachedLeaderboard, type GlobalLeaderboardRecord } from '../lib/storage';
 import { getSupabaseClient } from '../lib/supabase';
+import { GlobalLeaderboardService } from '../lib/realtime';
 
 interface LeaderboardProps {
   user: UserProfile;
 }
 
-interface LeaderboardEntry {
-  id: string;
-  username: string;
-  cps: number;
-  duration: number;
-  tier_text: string;
-  created_at?: string;
-}
-
 export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
   const [soloHistory, setSoloHistory] = useState<SoloScoreRecord[]>([]);
-  const [topScores, setTopScores] = useState<LeaderboardEntry[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [topScores, setTopScores] = useState<GlobalLeaderboardRecord[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const leaderboardServiceRef = useRef<GlobalLeaderboardService | null>(null);
+
+  const refreshScores = async () => {
+    setIsRefreshing(true);
+    const localCached = getCachedLeaderboard();
+
+    // Try Supabase if configured
+    const client = getSupabaseClient();
+    let supabaseScores: GlobalLeaderboardRecord[] = [];
+
+    if (client) {
+      try {
+        const { data, error } = await client
+          .from('solo_scores')
+          .select('id, username, cps, duration, tier_text, created_at')
+          .order('cps', { ascending: false })
+          .limit(20);
+
+        if (!error && data && data.length > 0) {
+          supabaseScores = data;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // Merge and deduplicate by username
+    const map = new Map<string, GlobalLeaderboardRecord>();
+
+    // Add local cached
+    for (const r of localCached) {
+      map.set(r.username.toLowerCase(), r);
+    }
+
+    // Add Supabase
+    for (const s of supabaseScores) {
+      const existing = map.get(s.username.toLowerCase());
+      if (!existing || s.cps > existing.cps) {
+        map.set(s.username.toLowerCase(), s);
+      }
+    }
+
+    // Ensure active user is present if they have tested
+    if (user.highScoreCps > 0) {
+      const userKey = user.username.toLowerCase();
+      const existing = map.get(userKey);
+      if (!existing || user.highScoreCps > existing.cps) {
+        map.set(userKey, {
+          id: user.id,
+          username: user.username,
+          cps: user.highScoreCps,
+          duration: 5,
+          tier_text: getEvaluation(user.highScoreCps).text,
+          created_at: user.createdAt || new Date().toISOString(),
+        });
+      }
+    }
+
+    const merged = Array.from(map.values()).sort((a, b) => b.cps - a.cps);
+    setTopScores(merged);
+    setIsRefreshing(false);
+    setIsLoading(false);
+  };
 
   useEffect(() => {
-    const history = getSoloHistory();
-    setSoloHistory(history);
+    // 1. Initial local history
+    setSoloHistory(getSoloHistory());
 
-    // Fetch real top scores from Supabase or fallback to local user high score
-    const fetchLeaderboard = async () => {
-      setIsLoading(true);
-      const client = getSupabaseClient();
-      if (client) {
-        try {
-          const { data, error } = await client
-            .from('solo_scores')
-            .select('id, username, cps, duration, tier_text, created_at')
-            .order('cps', { ascending: false })
-            .limit(10);
+    // 2. Load top scores immediately
+    refreshScores();
 
-          if (!error && data && data.length > 0) {
-            setTopScores(data);
-            setIsLoading(false);
-            return;
-          }
-        } catch {
-          // ignore error and fallback
-        }
-      }
+    // 3. Connect to global real-time leaderboard feed
+    const service = new GlobalLeaderboardService((_record) => {
+      // New score received globally
+      refreshScores();
+    });
+    service.init();
+    leaderboardServiceRef.current = service;
 
-      // If no Supabase connection yet, show only real local tests
-      if (user.highScoreCps > 0) {
-        setTopScores([
-          {
-            id: user.id,
-            username: user.username,
-            cps: user.highScoreCps,
-            duration: 5,
-            tier_text: getEvaluation(user.highScoreCps).text,
-          },
-        ]);
-      } else {
-        setTopScores([]);
-      }
-      setIsLoading(false);
+    return () => {
+      service.disconnect();
     };
-
-    fetchLeaderboard();
   }, [user]);
 
   return (
@@ -115,62 +145,106 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
       {/* Real Leaderboard Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Global Hall of Fame (Real Only) */}
-        <div className="bg-[#111426] border border-gray-800 rounded-2xl p-5 shadow-lg">
-          <div className="flex items-center space-x-2 mb-4">
-            <Trophy className="w-5 h-5 text-amber-400" />
-            <h3 className="text-base font-black text-white">En Yüksek CPS Rekorları</h3>
+        <div className="bg-[#111426] border border-gray-800 rounded-2xl p-5 shadow-lg flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center space-x-2">
+                <Trophy className="w-5 h-5 text-amber-400" />
+                <h3 className="text-base font-black text-white">Küresel CPS Rekorları</h3>
+              </div>
+              <button
+                onClick={refreshScores}
+                disabled={isRefreshing}
+                className="px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-bold flex items-center space-x-1 border border-gray-700 transition-all disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-amber-400' : ''}`} />
+                <span>Yenile</span>
+              </button>
+            </div>
+
+            {isLoading ? (
+              <div className="py-12 text-center text-gray-500 text-xs">Yükleniyor...</div>
+            ) : topScores.length === 0 ? (
+              <div className="py-12 text-center text-gray-500 text-xs space-y-2">
+                <Trophy className="w-8 h-8 mx-auto opacity-30 text-amber-400" />
+                <p>Henüz kayıtlı bir rekor bulunmuyor.</p>
+                <p className="text-purple-400 font-bold">İlk testi yapıp küresel rekoru sen kır!</p>
+              </div>
+            ) : (
+              <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
+                {topScores.map((item, idx) => {
+                  const evalInfo = getEvaluation(item.cps);
+                  const isMe =
+                    item.id === user.id ||
+                    item.username.toLowerCase() === user.username.toLowerCase();
+
+                  return (
+                    <div
+                      key={item.id || idx}
+                      className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
+                        isMe
+                          ? 'bg-purple-950/40 border-purple-500/50 shadow-[0_0_15px_rgba(168,85,247,0.2)]'
+                          : 'bg-[#15192e] border-gray-800/80 hover:border-gray-700'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-3">
+                        <div
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
+                            idx === 0
+                              ? 'bg-gradient-to-br from-amber-400 to-amber-600 text-black shadow-[0_0_10px_rgba(245,158,11,0.5)]'
+                              : idx === 1
+                              ? 'bg-gradient-to-br from-gray-200 to-gray-400 text-black'
+                              : idx === 2
+                              ? 'bg-gradient-to-br from-amber-700 to-amber-900 text-white'
+                              : 'bg-gray-800 text-gray-400'
+                          }`}
+                        >
+                          {idx === 0 ? (
+                            <Crown className="w-4 h-4 text-black" />
+                          ) : idx === 1 ? (
+                            <Award className="w-4 h-4 text-black" />
+                          ) : idx === 2 ? (
+                            <Flame className="w-4 h-4 text-white" />
+                          ) : (
+                            idx + 1
+                          )}
+                        </div>
+                        <div>
+                          <span
+                            className={`text-xs font-bold ${
+                              isMe ? 'text-purple-300' : 'text-gray-200'
+                            }`}
+                          >
+                            {item.username} {isMe && '(Sen)'}
+                          </span>
+                          <span
+                            className={`text-[10px] block font-black ${evalInfo.textColor}`}
+                          >
+                            "{evalInfo.text}"
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="text-right">
+                        <span className="text-base font-black text-amber-400 font-['Orbitron']">
+                          {Number(item.cps).toFixed(2)}
+                        </span>
+                        <span className="text-[10px] text-gray-500 block">CPS</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {isLoading ? (
-            <div className="py-12 text-center text-gray-500 text-xs">Yükleniyor...</div>
-          ) : topScores.length === 0 ? (
-            <div className="py-12 text-center text-gray-500 text-xs space-y-2">
-              <Trophy className="w-8 h-8 mx-auto opacity-30 text-amber-400" />
-              <p>Henüz kayıtlı bir rekor bulunmuyor.</p>
-              <p className="text-purple-400 font-bold">İlk testi yapıp rekoru sen kır!</p>
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {topScores.map((item, idx) => {
-                const evalInfo = getEvaluation(item.cps);
-                const isMe = item.id === user.id;
-
-                return (
-                  <div
-                    key={item.id || idx}
-                    className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
-                      isMe
-                        ? 'bg-purple-950/40 border-purple-500/50 shadow-[0_0_15px_rgba(168,85,247,0.2)]'
-                        : 'bg-[#15192e] border-gray-800/80'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-3">
-                      <div className={`w-6 h-6 rounded-lg flex items-center justify-center font-black text-xs ${
-                        idx === 0 ? 'bg-amber-500 text-black' : idx === 1 ? 'bg-gray-300 text-black' : idx === 2 ? 'bg-amber-800 text-white' : 'bg-gray-800 text-gray-400'
-                      }`}>
-                        {idx + 1}
-                      </div>
-                      <div>
-                        <span className={`text-xs font-bold ${isMe ? 'text-purple-300' : 'text-gray-200'}`}>
-                          {item.username} {isMe && '(Sen)'}
-                        </span>
-                        <span className={`text-[10px] block font-black ${evalInfo.textColor}`}>
-                          "{evalInfo.text}"
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="text-right">
-                      <span className="text-base font-black text-amber-400 font-['Orbitron']">
-                        {item.cps.toFixed(2)}
-                      </span>
-                      <span className="text-[10px] text-gray-500 block">CPS</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          <div className="mt-4 pt-3 border-t border-gray-800/80 flex items-center justify-between text-[11px] text-gray-400">
+            <span className="flex items-center space-x-1 text-emerald-400">
+              <Zap className="w-3.5 h-3.5" />
+              <span>Gerçek Zamanlı Global Sıralama</span>
+            </span>
+            <span>{topScores.length} Rekor</span>
+          </div>
         </div>
 
         {/* Solo Test History */}
@@ -186,8 +260,8 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
               Henüz solo test yapmadın. Solo sekmesinden hemen dene!
             </div>
           ) : (
-            <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
-              {soloHistory.slice(0, 8).map((rec) => {
+            <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
+              {soloHistory.slice(0, 15).map((rec) => {
                 const evalTier = getEvaluation(rec.cps);
                 return (
                   <div

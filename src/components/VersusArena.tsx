@@ -1,18 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Swords, Plus, LogIn, Bot, Sparkles, Zap, Hash, X, Check, Loader2 } from 'lucide-react';
-import mqtt, { type MqttClient } from 'mqtt';
 import type { UserProfile, VersusMatch } from '../types';
 import { VersusBattleRoom } from './VersusBattleRoom';
 import { sounds } from '../lib/sounds';
+import { MatchmakingQueueService } from '../lib/realtime';
 
 interface VersusArenaProps {
   user: UserProfile;
   onUserUpdate: (u: UserProfile) => void;
   addParticles: (x: number, y: number, text: string, color: string) => void;
 }
-
-const QUEUE_TOPIC = 'cps_arena_v2/global_matchmaking_queue';
-const BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
 
 export const VersusArena: React.FC<VersusArenaProps> = ({
   user,
@@ -32,8 +29,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
   // Queue State
   const [isQueueActive, setIsQueueActive] = useState<boolean>(false);
   const [queueTime, setQueueTime] = useState<number>(0);
-  const queueClientRef = useRef<MqttClient | null>(null);
-  const queueIntervalRef = useRef<number | null>(null);
+  const queueServiceRef = useRef<MatchmakingQueueService | null>(null);
   const queueTimerRef = useRef<number | null>(null);
 
   // Helper to generate random 1 - 7 seconds match duration
@@ -58,133 +54,55 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
       setQueueTime(Math.floor((Date.now() - startTime) / 1000));
     }, 1000);
 
-    const clientId = `queue_${user.id}_${Math.floor(Math.random() * 10000)}`;
+    const queueService = new MatchmakingQueueService(user, {
+      onMatched: ({ roomId, duration, isHost, opponent }) => {
+        sounds.playVictory();
+        handleLeaveQueue();
 
-    try {
-      const client = mqtt.connect(BROKER_URL, {
-        clientId,
-        clean: true,
-        connectTimeout: 5000,
-      });
-      queueClientRef.current = client;
+        setCurrentMatch({
+          roomId,
+          roomName: `Sıra Maçı #${roomId}`,
+          isHost,
+          duration,
+          startWindowSeconds: 10,
+          createdAt: Date.now(),
+          startWindowExpiresAt: Date.now() + 10000,
+          status: 'waiting',
+          player1: {
+            id: user.id,
+            username: user.username,
+            clicks: 0,
+            cps: 0,
+            hasStarted: false,
+            hasFinished: false,
+          },
+          player2: {
+            id: opponent.id,
+            username: opponent.username,
+            clicks: 0,
+            cps: 0,
+            hasStarted: false,
+            hasFinished: false,
+          },
+        });
+      },
+      onError: (err) => {
+        console.warn('Queue error:', err);
+      },
+    });
 
-      client.on('connect', () => {
-        client.subscribe(QUEUE_TOPIC, { qos: 0 });
-
-        // Announce presence in queue every 1s
-        queueIntervalRef.current = window.setInterval(() => {
-          client.publish(
-            QUEUE_TOPIC,
-            JSON.stringify({
-              type: 'QUEUE_WAITING',
-              user,
-              timestamp: Date.now(),
-            })
-          );
-        }, 1200);
-      });
-
-      client.on('message', (_top, payloadBuf) => {
-        try {
-          const msg = JSON.parse(payloadBuf.toString());
-          if (!msg) return;
-
-          // If another player is waiting in queue and not self
-          if (msg.type === 'QUEUE_WAITING' && msg.user?.id !== user.id) {
-            // Found a waiting player -> Initiate Match as Host
-            const matchedRoomId = `Q_${generateRandomRoomCode()}`;
-            const matchDuration = generateRandomDuration();
-
-            // Broadcast MATCH_CREATED
-            client.publish(
-              QUEUE_TOPIC,
-              JSON.stringify({
-                type: 'QUEUE_MATCH_CREATED',
-                roomId: matchedRoomId,
-                duration: matchDuration,
-                targetUserId: msg.user.id,
-                hostUser: user,
-                guestUser: msg.user,
-              })
-            );
-
-            // Clean queue and enter match as host
-            handleLeaveQueue();
-
-            setCurrentMatch({
-              roomId: matchedRoomId,
-              roomName: `Sıra Maçı #${matchedRoomId}`,
-              isHost: true,
-              duration: matchDuration,
-              startWindowSeconds: 10,
-              createdAt: Date.now(),
-              startWindowExpiresAt: Date.now() + 10000,
-              status: 'waiting',
-              player1: {
-                id: user.id,
-                username: user.username,
-                clicks: 0,
-                cps: 0,
-                hasStarted: false,
-                hasFinished: false,
-              },
-              player2: {
-                id: msg.user.id,
-                username: msg.user.username,
-                clicks: 0,
-                cps: 0,
-                hasStarted: false,
-                hasFinished: false,
-              },
-            });
-          }
-
-          // If another player matched us
-          if (msg.type === 'QUEUE_MATCH_CREATED' && msg.targetUserId === user.id) {
-            handleLeaveQueue();
-
-            setCurrentMatch({
-              roomId: msg.roomId,
-              roomName: `Sıra Maçı #${msg.roomId}`,
-              isHost: false, // guest
-              duration: msg.duration,
-              startWindowSeconds: 10,
-              createdAt: Date.now(),
-              startWindowExpiresAt: Date.now() + 10000,
-              status: 'waiting',
-              player1: {
-                id: user.id,
-                username: user.username,
-                clicks: 0,
-                cps: 0,
-                hasStarted: false,
-                hasFinished: false,
-              },
-              player2: {
-                id: msg.hostUser.id,
-                username: msg.hostUser.username,
-                clicks: 0,
-                cps: 0,
-                hasStarted: false,
-                hasFinished: false,
-              },
-            });
-          }
-        } catch {
-          // ignore parse error
-        }
-      });
-    } catch (e) {
-      console.warn('Queue error:', e);
-    }
+    queueServiceRef.current = queueService;
+    queueService.start();
   };
 
   const handleLeaveQueue = () => {
-    if (queueIntervalRef.current) clearInterval(queueIntervalRef.current);
-    if (queueTimerRef.current) clearInterval(queueTimerRef.current);
-    if (queueClientRef.current) {
-      queueClientRef.current.end(true);
-      queueClientRef.current = null;
+    if (queueTimerRef.current) {
+      clearInterval(queueTimerRef.current);
+      queueTimerRef.current = null;
+    }
+    if (queueServiceRef.current) {
+      queueServiceRef.current.stop();
+      queueServiceRef.current = null;
     }
     setIsQueueActive(false);
   };
@@ -194,6 +112,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
       handleLeaveQueue();
     };
   }, []);
+
 
   // ----------------------------------------------------
   // Room Creation & Joining

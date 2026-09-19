@@ -25,7 +25,7 @@ async function hashPassword(password: string): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function getAllUsers(): StoredUserAccount[] {
+export function getAllUsers(): StoredUserAccount[] {
   try {
     const saved = localStorage.getItem(USERS_DB_KEY);
     return saved ? JSON.parse(saved) : [];
@@ -34,13 +34,82 @@ function getAllUsers(): StoredUserAccount[] {
   }
 }
 
-function saveAllUsers(users: StoredUserAccount[]): void {
+export function saveAllUsers(users: StoredUserAccount[]): void {
   try {
     localStorage.setItem(USERS_DB_KEY, JSON.stringify(users));
   } catch (err) {
     console.error('Failed to save users database:', err);
   }
 }
+
+const GLOBAL_LEADERBOARD_KEY = 'cps_arena_global_leaderboard_cache_v2';
+
+export interface GlobalLeaderboardRecord {
+  id: string;
+  username: string;
+  cps: number;
+  duration: number;
+  tier_text: string;
+  created_at: string;
+  isMe?: boolean;
+}
+
+export function getCachedLeaderboard(): GlobalLeaderboardRecord[] {
+  try {
+    const saved = localStorage.getItem(GLOBAL_LEADERBOARD_KEY);
+    const cached: GlobalLeaderboardRecord[] = saved ? JSON.parse(saved) : [];
+    
+    // Merge with registered local users
+    const localUsers = getAllUsers();
+    const map = new Map<string, GlobalLeaderboardRecord>();
+    
+    // Add cached
+    for (const c of cached) {
+      map.set(c.username.toLowerCase(), c);
+    }
+    
+    // Add local users
+    for (const u of localUsers) {
+      if (u.highScoreCps > 0) {
+        const existing = map.get(u.username.toLowerCase());
+        if (!existing || u.highScoreCps > existing.cps) {
+          map.set(u.username.toLowerCase(), {
+            id: u.id,
+            username: u.username,
+            cps: u.highScoreCps,
+            duration: 5,
+            tier_text: u.highScoreCps >= 13 ? 'I AM BETTER' : u.highScoreCps >= 9.01 ? 'AFERİN LA' : u.highScoreCps >= 8 ? 'GÜZEL' : 'ÇIK SİTEDEN BİR DAHA GELME',
+            created_at: u.createdAt || new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    const result = Array.from(map.values()).sort((a, b) => b.cps - a.cps);
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+export function saveLeaderboardRecord(record: GlobalLeaderboardRecord): void {
+  try {
+    const current = getCachedLeaderboard();
+    const existingIdx = current.findIndex((r) => r.username.toLowerCase() === record.username.toLowerCase());
+    if (existingIdx !== -1) {
+      if (record.cps >= current[existingIdx].cps) {
+        current[existingIdx] = record;
+      }
+    } else {
+      current.push(record);
+    }
+    current.sort((a, b) => b.cps - a.cps);
+    localStorage.setItem(GLOBAL_LEADERBOARD_KEY, JSON.stringify(current.slice(0, 50)));
+  } catch (err) {
+    console.error('Failed to cache leaderboard record:', err);
+  }
+}
+
 
 // ----------------------------------------------------
 // Authentication: Register, Login, Logout, Session
@@ -289,6 +358,33 @@ export function recordSoloScore(
     };
     history.unshift(newRecord);
     localStorage.setItem(SOLO_HISTORY_KEY, JSON.stringify(history.slice(0, 30)));
+
+    // Also update global leaderboard cache
+    saveLeaderboardRecord({
+      id: profile.id,
+      username: profile.username,
+      cps: Number(cps.toFixed(2)),
+      duration,
+      tier_text: tierText,
+      created_at: new Date().toISOString(),
+    });
+
+    // Notify other tabs via BroadcastChannel
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const bc = new BroadcastChannel('cps_arena_leaderboard_channel');
+      bc.postMessage({
+        type: 'NEW_SCORE',
+        payload: {
+          id: profile.id,
+          username: profile.username,
+          cps: Number(cps.toFixed(2)),
+          duration,
+          tier_text: tierText,
+          created_at: new Date().toISOString(),
+        },
+      });
+      bc.close();
+    }
   } catch (err) {
     console.error('Failed to save solo record:', err);
   }
@@ -330,5 +426,17 @@ export function recordMatchResult(won: boolean, clicks: number, cps: number): Us
     saveAllUsers(users);
   }
 
+  if (cps > 0) {
+    saveLeaderboardRecord({
+      id: profile.id,
+      username: profile.username,
+      cps: Number(cps.toFixed(2)),
+      duration: 5,
+      tier_text: cps >= 13 ? 'I AM BETTER' : cps >= 9.01 ? 'AFERİN LA' : cps >= 8 ? 'GÜZEL' : 'ÇIK SİTEDEN BİR DAHA GELME',
+      created_at: new Date().toISOString(),
+    });
+  }
+
   return profile;
 }
+
