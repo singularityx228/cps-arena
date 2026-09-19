@@ -577,18 +577,13 @@ const LEADERBOARD_FEED_TOPIC = 'cps_arena_v3/global_leaderboard_feed';
 export class GlobalLeaderboardService {
   private client: MqttClient | null = null;
   private localBroadcast: BroadcastChannel | null = null;
-  private onStateReceived: ((records: GlobalLeaderboardRecord[]) => void) | null = null;
-  private onScoreReceived: ((record: GlobalLeaderboardRecord) => void) | null = null;
-
-  constructor(
-    onStateReceived?: (records: GlobalLeaderboardRecord[]) => void,
-    onScoreReceived?: (record: GlobalLeaderboardRecord) => void
-  ) {
-    this.onStateReceived = onStateReceived || null;
-    this.onScoreReceived = onScoreReceived || null;
-  }
+  private listeners: Set<() => void> = new Set();
+  private pendingBroadcasts: GlobalLeaderboardRecord[] = [];
+  public isConnected: boolean = false;
 
   public init() {
+    if (this.client) return; // already initialized
+
     // 1. Local Broadcast Channel
     try {
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -597,12 +592,12 @@ export class GlobalLeaderboardService {
           const { type, payload, records } = event.data || {};
           if (type === 'NEW_SCORE' && payload) {
             saveLeaderboardRecord(payload);
-            this.onScoreReceived?.(payload);
+            this.notifyListeners();
           } else if (type === 'STATE_UPDATE' && records) {
             for (const r of records) {
               saveLeaderboardRecord(r);
             }
-            this.onStateReceived?.(records);
+            this.notifyListeners();
           }
         };
       }
@@ -613,19 +608,30 @@ export class GlobalLeaderboardService {
     // 2. MQTT WebSocket Global Feed & Retained Cloud State
     const clientId = `ldr_${Math.random().toString(36).substring(2, 9)}_${Date.now().toString(36)}`;
     try {
-      this.client = mqtt.connect(BROKER_SERVERS[0], {
+      const client = mqtt.connect(BROKER_SERVERS[0], {
         clientId,
         clean: true,
         connectTimeout: 5000,
-        reconnectPeriod: 3000,
+        reconnectPeriod: 2500,
+        keepalive: 15,
       });
+      this.client = client;
 
-      this.client.on('connect', () => {
+      client.on('connect', () => {
+        this.isConnected = true;
         // Subscribe to retained state topic & live feed topic with QoS 1
-        this.client?.subscribe([LEADERBOARD_STATE_TOPIC, LEADERBOARD_FEED_TOPIC], { qos: 1 });
+        client.subscribe([LEADERBOARD_STATE_TOPIC, LEADERBOARD_FEED_TOPIC], { qos: 1 });
+
+        // Flush any pending broadcasts
+        while (this.pendingBroadcasts.length > 0) {
+          const item = this.pendingBroadcasts.shift();
+          if (item) {
+            this.broadcastScore(item);
+          }
+        }
       });
 
-      this.client.on('message', (topic, payloadBuf) => {
+      client.on('message', (topic, payloadBuf) => {
         try {
           const msg = JSON.parse(payloadBuf.toString());
           if (!msg) return;
@@ -634,22 +640,48 @@ export class GlobalLeaderboardService {
             for (const r of msg.records) {
               saveLeaderboardRecord(r);
             }
-            this.onStateReceived?.(msg.records);
+            this.notifyListeners();
           } else if (msg.type === 'GLOBAL_SCORE_ANNOUNCE' && msg.record) {
             saveLeaderboardRecord(msg.record);
-            this.onScoreReceived?.(msg.record);
+            this.notifyListeners();
           }
         } catch {
           // ignore
         }
+      });
+
+      client.on('close', () => {
+        this.isConnected = false;
       });
     } catch (err) {
       console.warn('Leaderboard sync error:', err);
     }
   }
 
+  public subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private notifyListeners() {
+    this.listeners.forEach((fn) => {
+      try {
+        fn();
+      } catch {
+        // ignore
+      }
+    });
+  }
+
   public broadcastScore(record: GlobalLeaderboardRecord) {
     saveLeaderboardRecord(record);
+
+    if (!this.client || !this.isConnected) {
+      this.pendingBroadcasts.push(record);
+      this.init();
+    }
 
     // Merge and compute new global top 30 ledger
     const currentCached = getCachedLeaderboard();
@@ -683,21 +715,10 @@ export class GlobalLeaderboardService {
       this.localBroadcast.postMessage({ type: 'STATE_UPDATE', records: updatedTopList });
       this.localBroadcast.postMessage({ type: 'NEW_SCORE', payload: record });
     }
-  }
-
-  public disconnect() {
-    if (this.localBroadcast) {
-      this.localBroadcast.close();
-      this.localBroadcast = null;
-    }
-    if (this.client) {
-      try {
-        this.client.end(false);
-      } catch {
-        // ignore
-      }
-      this.client = null;
-    }
+    this.notifyListeners();
   }
 }
+
+export const globalLeaderboardService = new GlobalLeaderboardService();
+
 

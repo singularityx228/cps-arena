@@ -5,7 +5,9 @@ import type { EvaluationTier, UserProfile } from '../types';
 import { getEvaluation } from '../types';
 import { recordSoloScore } from '../lib/storage';
 import { sounds } from '../lib/sounds';
-import { GlobalLeaderboardService } from '../lib/realtime';
+import { globalLeaderboardService } from '../lib/realtime';
+
+
 
 
 interface SoloCpsTestProps {
@@ -136,25 +138,21 @@ export const SoloCpsTest: React.FC<SoloCpsTestProps> = ({
     setIsNewRecord(isNewHighScore);
     onUserUpdate(profile);
 
-    // Global real-time leaderboard broadcast
+    // Global real-time leaderboard broadcast across all devices
     try {
-      const ldr = new GlobalLeaderboardService();
-      ldr.init();
-      setTimeout(() => {
-        ldr.broadcastScore({
-          id: profile.id,
-          username: profile.username,
-          cps: finalCalculatedCps,
-          duration: selectedDuration,
-          tier_text: evalTier.text,
-          created_at: new Date().toISOString(),
-        });
-        setTimeout(() => ldr.disconnect(), 500);
-      }, 200);
-    } catch {
-      // ignore
+      globalLeaderboardService.broadcastScore({
+        id: profile.id,
+        username: profile.username,
+        cps: finalCalculatedCps,
+        duration: selectedDuration,
+        tier_text: evalTier.text,
+        created_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('Leaderboard broadcast error:', err);
     }
   };
+
 
 
   // Click handler (supports touch & mouse seamlessly)

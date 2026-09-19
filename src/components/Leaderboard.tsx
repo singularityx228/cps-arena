@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Trophy, Clock, History, RefreshCw, Zap, Flame, Crown, Award } from 'lucide-react';
+
+
 import type { UserProfile, SoloScoreRecord } from '../types';
 import { getEvaluation } from '../types';
 import { getSoloHistory, getCachedLeaderboard, type GlobalLeaderboardRecord } from '../lib/storage';
 import { getSupabaseClient } from '../lib/supabase';
-import { GlobalLeaderboardService } from '../lib/realtime';
+import { globalLeaderboardService } from '../lib/realtime';
 
 interface LeaderboardProps {
   user: UserProfile;
@@ -15,7 +17,6 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
   const [topScores, setTopScores] = useState<GlobalLeaderboardRecord[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const leaderboardServiceRef = useRef<GlobalLeaderboardService | null>(null);
 
   const refreshScores = async () => {
     setIsRefreshing(true);
@@ -31,7 +32,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
           .from('solo_scores')
           .select('id, username, cps, duration, tier_text, created_at')
           .order('cps', { ascending: false })
-          .limit(20);
+          .limit(30);
 
         if (!error && data && data.length > 0) {
           supabaseScores = data;
@@ -86,22 +87,17 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
     // 2. Load top scores immediately
     refreshScores();
 
-    // 3. Connect to global real-time leaderboard feed and retained cloud state
-    const service = new GlobalLeaderboardService(
-      (_stateRecords) => {
-        refreshScores();
-      },
-      (_newScore) => {
-        refreshScores();
-      }
-    );
-    service.init();
-    leaderboardServiceRef.current = service;
+    // 3. Connect and subscribe to singleton global leaderboard cloud sync
+    globalLeaderboardService.init();
+    const unsubscribe = globalLeaderboardService.subscribe(() => {
+      refreshScores();
+    });
 
     return () => {
-      service.disconnect();
+      unsubscribe();
     };
   }, [user]);
+
 
 
   return (
