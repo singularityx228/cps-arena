@@ -126,24 +126,15 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     }
 
     sounds.playClick();
-    const matchDuration = generateRandomDuration();
     const newMatch: VersusMatch = {
       roomId: code,
       roomName: `Oda #${code}`,
-      duration: matchDuration,
+      duration: 5, // Will be synced from Host
       startWindowSeconds: 10,
       createdAt: Date.now(),
       startWindowExpiresAt: Date.now() + 10000,
-      status: 'ready',
+      status: 'waiting',
       player1: {
-        id: 'host_' + code,
-        username: 'Oda Kurucusu',
-        clicks: 0,
-        cps: 0,
-        hasStarted: false,
-        hasFinished: false,
-      },
-      player2: {
         id: user.id,
         username: user.username,
         clicks: 0,

@@ -1,9 +1,8 @@
-import Peer, { type DataConnection } from 'peerjs';
+import mqtt, { type MqttClient } from 'mqtt';
 import type { UserProfile, PlayerState } from '../types';
-import { getSupabaseClient } from './supabase';
 
 export interface MatchNetworkCallbacks {
-  onOpponentConnected: (opponent: PlayerState, matchDuration?: number) => void;
+  onOpponentConnected: (opponent: PlayerState, syncedDuration: number) => void;
   onOpponentStart: (startTime: number) => void;
   onOpponentClickUpdate: (opponent: PlayerState) => void;
   onOpponentFinish: (result: { clicks: number; cps: number; timedOut?: boolean }) => void;
@@ -13,14 +12,22 @@ export interface MatchNetworkCallbacks {
 }
 
 export interface NetworkMessage {
-  type: 'HELLO_JOIN' | 'HOST_WELCOME' | 'START_COUNTDOWN' | 'PLAYER_CLICK' | 'PLAYER_FINISH' | 'REMATCH' | 'PING' | 'PONG';
-  payload: any;
+  type: 'HOST_WAITING' | 'GUEST_JOIN' | 'MATCH_START' | 'PLAYER_CLICK' | 'PLAYER_START_CLICK' | 'PLAYER_FINISH' | 'REMATCH';
   senderId: string;
+  senderName: string;
+  roomId: string;
+  payload: any;
 }
 
+// Global public MQTT WebSocket brokers with SSL
+const BROKER_SERVERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081',
+];
+
 export class UniversalMatchEngine {
-  private peer: Peer | null = null;
-  private connection: DataConnection | null = null;
+  private client: MqttClient | null = null;
   private localBroadcast: BroadcastChannel | null = null;
   private roomId: string;
   private currentUser: UserProfile;
@@ -28,7 +35,10 @@ export class UniversalMatchEngine {
   private matchDuration: number;
   private callbacks: MatchNetworkCallbacks;
   public isConnected: boolean = false;
-  private pingInterval: number | null = null;
+  private announceInterval: number | null = null;
+  private joinRetryInterval: number | null = null;
+  private topic: string;
+  private hasMatched: boolean = false;
 
   constructor(
     roomId: string,
@@ -42,205 +52,133 @@ export class UniversalMatchEngine {
     this.isHost = isHost;
     this.matchDuration = matchDuration;
     this.callbacks = callbacks;
+    this.topic = `cps_arena_v2/rooms/${this.roomId}`;
   }
 
   public init() {
-    this.callbacks.onStatusChange(this.isHost ? 'Oda açılıyor, sunucuya bağlanılıyor...' : 'Odaya bağlanılıyor...');
+    this.callbacks.onStatusChange(this.isHost ? 'Oda açılıyor...' : 'Odaya bağlanılıyor...');
 
-    // 1. Cross-tab BroadcastChannel for instant local tests
+    // 1. Cross-tab Local Broadcast for instant test
     try {
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-        this.localBroadcast = new BroadcastChannel(`cps_mesh_${this.roomId}`);
+        this.localBroadcast = new BroadcastChannel(`cps_v2_${this.roomId}`);
         this.localBroadcast.onmessage = (event) => {
-          this.handleIncomingMessage(event.data);
+          this.handleIncoming(event.data);
         };
       }
     } catch {
       // ignore
     }
 
-    // 2. Initialize Universal WebRTC PeerJS across all Operating Systems & Devices
-    const hostPeerId = `cps-room-${this.roomId}-host`;
-    const guestPeerId = `cps-room-${this.roomId}-g-${this.currentUser.id.substring(0, 8)}`;
-
-    const myPeerId = this.isHost ? hostPeerId : guestPeerId;
+    // 2. Connect to Global Ultra-Low-Latency MQTT WebSocket Broker
+    const clientId = `cps_${this.isHost ? 'host' : 'guest'}_${this.currentUser.id.substring(0, 8)}_${Math.floor(Math.random() * 1000)}`;
 
     try {
-      this.peer = new Peer(myPeerId, {
-        debug: 0,
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun.cloudflare.com:3478' },
-          ],
-        },
+      this.client = mqtt.connect(BROKER_SERVERS[0], {
+        clientId,
+        clean: true,
+        connectTimeout: 5000,
+        reconnectPeriod: 2000,
+        keepalive: 15,
       });
 
-      this.peer.on('open', (_id) => {
-        this.callbacks.onStatusChange(this.isHost ? 'Oda hazır! Rakip bekleniyor...' : 'Oda bulundu, katılınıyor...');
+      this.client.on('connect', () => {
+        this.isConnected = true;
+        this.callbacks.onStatusChange(this.isHost ? 'Oda hazır! Rakip bekleniyor...' : 'Odaya bağlanıldı, rakip aranıyor...');
 
-        if (!this.isHost) {
-          // Connect to Host Peer
-          this.connectToHost(hostPeerId);
+        // Subscribe to room topic
+        this.client?.subscribe(this.topic, { qos: 0 }, (err) => {
+          if (!err) {
+            if (this.isHost) {
+              // Host announces room periodically while waiting
+              this.announceInterval = window.setInterval(() => {
+                if (!this.hasMatched) {
+                  this.send({
+                    type: 'HOST_WAITING',
+                    senderId: this.currentUser.id,
+                    senderName: this.currentUser.username,
+                    roomId: this.roomId,
+                    payload: { matchDuration: this.matchDuration },
+                  });
+                }
+              }, 1200);
+            } else {
+              // Guest sends join request periodically until matched
+              this.sendJoinRequest();
+              this.joinRetryInterval = window.setInterval(() => {
+                if (!this.hasMatched) {
+                  this.sendJoinRequest();
+                }
+              }, 1000);
+            }
+          }
+        });
+      });
+
+      this.client.on('message', (_top, payloadBuffer) => {
+        try {
+          const msgStr = payloadBuffer.toString();
+          const parsed = JSON.parse(msgStr);
+          this.handleIncoming(parsed);
+        } catch {
+          // parse error
         }
       });
 
-      this.peer.on('connection', (conn) => {
-        this.setupConnection(conn);
-      });
-
-      this.peer.on('error', (err: any) => {
-        console.warn('PeerJS warning/error:', err.type || err);
-        if (err.type === 'unavailable-id') {
-          // If host ID is already taken, someone else is host, join as guest
-          if (this.isHost) {
-            this.callbacks.onConnectionError('Bu oda numarası şu an başka bir oyuncu tarafından kullanılıyor. Lütfen başka bir oda numarası seçin.');
-          }
-        } else if (err.type === 'peer-unavailable') {
-          if (!this.isHost) {
-            this.callbacks.onConnectionError(`Oda #${this.roomId} bulunamadı. Oda numarasını doğru girdiğinizden emin olun.`);
-          }
-        }
+      this.client.on('error', (err) => {
+        console.warn('MQTT error, trying fallback:', err);
       });
     } catch (e: any) {
-      console.warn('Failed to init PeerJS:', e);
-    }
-
-    // 3. If Supabase configured, subscribe to Supabase Realtime channel as well
-    this.initSupabaseRealtime();
-
-    // If Guest, broadcast HELLO on local channel as well
-    if (!this.isHost) {
-      setTimeout(() => {
-        this.broadcastLocal({
-          type: 'HELLO_JOIN',
-          senderId: this.currentUser.id,
-          payload: {
-            user: this.currentUser,
-          },
-        });
-      }, 500);
+      console.warn('Failed to connect to primary broker:', e);
     }
   }
 
-  private connectToHost(hostPeerId: string) {
-    if (!this.peer) return;
-    const conn = this.peer.connect(hostPeerId, { reliable: true });
-    this.setupConnection(conn);
-  }
-
-  private setupConnection(conn: DataConnection) {
-    this.connection = conn;
-
-    conn.on('open', () => {
-      this.isConnected = true;
-      this.callbacks.onStatusChange('Bağlantı kuruldu!');
-
-      if (!this.isHost) {
-        // Send join info to host
-        this.sendMessage({
-          type: 'HELLO_JOIN',
-          senderId: this.currentUser.id,
-          payload: {
-            user: this.currentUser,
-          },
-        });
-      } else {
-        // Host sends welcome with room duration
-        this.sendMessage({
-          type: 'HOST_WELCOME',
-          senderId: this.currentUser.id,
-          payload: {
-            host: this.currentUser,
-            matchDuration: this.matchDuration,
-          },
-        });
-      }
-
-      // Start keep-alive ping
-      this.pingInterval = window.setInterval(() => {
-        if (this.connection?.open) {
-          this.sendMessage({
-            type: 'PING',
-            senderId: this.currentUser.id,
-            payload: {},
-          });
-        }
-      }, 3000);
-    });
-
-    conn.on('data', (data) => {
-      this.handleIncomingMessage(data as NetworkMessage);
-    });
-
-    conn.on('close', () => {
-      this.isConnected = false;
-      this.callbacks.onStatusChange('Rakip odadan ayrıldı.');
-    });
-
-    conn.on('error', (err) => {
-      console.warn('Connection error:', err);
+  private sendJoinRequest() {
+    this.send({
+      type: 'GUEST_JOIN',
+      senderId: this.currentUser.id,
+      senderName: this.currentUser.username,
+      roomId: this.roomId,
+      payload: {
+        guest: this.currentUser,
+      },
     });
   }
 
-  private initSupabaseRealtime() {
-    const client = getSupabaseClient();
-    if (!client) return;
-
-    try {
-      const channel = client.channel(`mesh_room_${this.roomId}`, {
-        config: { broadcast: { self: false } },
-      });
-
-      channel.on('broadcast', { event: 'cps_msg' }, ({ payload }) => {
-        if (payload && payload.senderId !== this.currentUser.id) {
-          this.handleIncomingMessage(payload);
-        }
-      });
-
-      channel.subscribe((status) => {
-        if (status === 'SUBSCRIBED' && !this.isHost) {
-          channel.send({
-            type: 'broadcast',
-            event: 'cps_msg',
-            payload: {
-              type: 'HELLO_JOIN',
-              senderId: this.currentUser.id,
-              payload: { user: this.currentUser },
-            },
-          });
-        }
-      });
-    } catch (e) {
-      console.warn('Supabase realtime mesh init error:', e);
-    }
-  }
-
-  private handleIncomingMessage(msg: NetworkMessage) {
-    if (!msg || msg.senderId === this.currentUser.id) return;
+  private handleIncoming(msg: NetworkMessage) {
+    if (!msg || msg.senderId === this.currentUser.id || msg.roomId !== this.roomId) return;
 
     switch (msg.type) {
-      case 'HELLO_JOIN': {
-        const guest = msg.payload?.user;
-        if (guest && this.isHost) {
-          // Notify Host that guest connected
-          this.callbacks.onOpponentConnected({
-            id: guest.id,
-            username: guest.username,
-            clicks: 0,
-            cps: 0,
-            hasStarted: false,
-            hasFinished: false,
-          }, this.matchDuration);
+      // HOST receives GUEST_JOIN -> Host accepts and initiates match with Host's duration
+      case 'GUEST_JOIN': {
+        if (this.isHost && !this.hasMatched) {
+          this.hasMatched = true;
+          if (this.announceInterval) clearInterval(this.announceInterval);
 
-          // Reply with Host Welcome & Duration
-          this.sendMessage({
-            type: 'HOST_WELCOME',
+          const guestUser = msg.payload?.guest || { id: msg.senderId, username: msg.senderName };
+
+          // Notify Host
+          this.callbacks.onOpponentConnected(
+            {
+              id: guestUser.id,
+              username: guestUser.username,
+              clicks: 0,
+              cps: 0,
+              hasStarted: false,
+              hasFinished: false,
+            },
+            this.matchDuration
+          );
+
+          // Broadcast MATCH_START with exact Host duration to Guest
+          this.send({
+            type: 'MATCH_START',
             senderId: this.currentUser.id,
+            senderName: this.currentUser.username,
+            roomId: this.roomId,
             payload: {
               host: this.currentUser,
+              guest: guestUser,
               matchDuration: this.matchDuration,
             },
           });
@@ -248,23 +186,39 @@ export class UniversalMatchEngine {
         break;
       }
 
-      case 'HOST_WELCOME': {
-        const host = msg.payload?.host;
-        const duration = msg.payload?.matchDuration || this.matchDuration;
-        if (host && !this.isHost) {
-          this.callbacks.onOpponentConnected({
-            id: host.id,
-            username: host.username,
-            clicks: 0,
-            cps: 0,
-            hasStarted: false,
-            hasFinished: false,
-          }, duration);
+      // GUEST receives MATCH_START -> Guest syncs duration and starts
+      case 'MATCH_START': {
+        if (!this.isHost && !this.hasMatched) {
+          this.hasMatched = true;
+          if (this.joinRetryInterval) clearInterval(this.joinRetryInterval);
+
+          const hostUser = msg.payload?.host || { id: msg.senderId, username: msg.senderName };
+          const syncedDuration = msg.payload?.matchDuration || this.matchDuration;
+
+          this.callbacks.onOpponentConnected(
+            {
+              id: hostUser.id,
+              username: hostUser.username,
+              clicks: 0,
+              cps: 0,
+              hasStarted: false,
+              hasFinished: false,
+            },
+            syncedDuration
+          );
         }
         break;
       }
 
-      case 'START_COUNTDOWN': {
+      case 'HOST_WAITING': {
+        if (!this.isHost && !this.hasMatched) {
+          // Host is waiting, send join immediately
+          this.sendJoinRequest();
+        }
+        break;
+      }
+
+      case 'PLAYER_START_CLICK': {
         this.callbacks.onOpponentStart(msg.payload?.startTime || Date.now());
         break;
       }
@@ -286,49 +240,24 @@ export class UniversalMatchEngine {
         break;
       }
 
-      case 'PING': {
-        this.sendMessage({
-          type: 'PONG',
-          senderId: this.currentUser.id,
-          payload: {},
-        });
-        break;
-      }
-
       default:
         break;
     }
   }
 
-  public sendMessage(msg: NetworkMessage) {
-    // 1. Send via WebRTC DataChannel (Ultra fast)
-    if (this.connection?.open) {
-      try {
-        this.connection.send(msg);
-      } catch {
-        // fallback
-      }
-    }
+  public send(msg: NetworkMessage) {
+    const jsonStr = JSON.stringify(msg);
 
-    // 2. Send via Local BroadcastChannel
-    this.broadcastLocal(msg);
-
-    // 3. Send via Supabase Realtime if active
-    const client = getSupabaseClient();
-    if (client) {
+    // 1. Send via MQTT WebSocket
+    if (this.client?.connected) {
       try {
-        client.channel(`mesh_room_${this.roomId}`).send({
-          type: 'broadcast',
-          event: 'cps_msg',
-          payload: msg,
-        });
+        this.client.publish(this.topic, jsonStr, { qos: 0 });
       } catch {
         // ignore
       }
     }
-  }
 
-  private broadcastLocal(msg: NetworkMessage) {
+    // 2. Send via Local BroadcastChannel
     if (this.localBroadcast) {
       try {
         this.localBroadcast.postMessage(msg);
@@ -339,9 +268,11 @@ export class UniversalMatchEngine {
   }
 
   public broadcastPlayerClicks(clicks: number, cps: number) {
-    this.sendMessage({
+    this.send({
       type: 'PLAYER_CLICK',
       senderId: this.currentUser.id,
+      senderName: this.currentUser.username,
+      roomId: this.roomId,
       payload: {
         player: {
           id: this.currentUser.id,
@@ -356,42 +287,45 @@ export class UniversalMatchEngine {
   }
 
   public broadcastPlayerStart(startTime: number) {
-    this.sendMessage({
-      type: 'START_COUNTDOWN',
+    this.send({
+      type: 'PLAYER_START_CLICK',
       senderId: this.currentUser.id,
+      senderName: this.currentUser.username,
+      roomId: this.roomId,
       payload: { startTime },
     });
   }
 
   public broadcastPlayerFinish(clicks: number, cps: number, timedOut: boolean = false) {
-    this.sendMessage({
+    this.send({
       type: 'PLAYER_FINISH',
       senderId: this.currentUser.id,
+      senderName: this.currentUser.username,
+      roomId: this.roomId,
       payload: { clicks, cps, timedOut },
     });
   }
 
   public broadcastRematch() {
-    this.sendMessage({
+    this.send({
       type: 'REMATCH',
       senderId: this.currentUser.id,
+      senderName: this.currentUser.username,
+      roomId: this.roomId,
       payload: {},
     });
   }
 
   public disconnect() {
-    if (this.pingInterval) clearInterval(this.pingInterval);
+    if (this.announceInterval) clearInterval(this.announceInterval);
+    if (this.joinRetryInterval) clearInterval(this.joinRetryInterval);
     if (this.localBroadcast) {
       this.localBroadcast.close();
       this.localBroadcast = null;
     }
-    if (this.connection) {
-      this.connection.close();
-      this.connection = null;
-    }
-    if (this.peer) {
-      this.peer.destroy();
-      this.peer = null;
+    if (this.client) {
+      this.client.end(true);
+      this.client = null;
     }
     this.isConnected = false;
   }
