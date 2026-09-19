@@ -1,4 +1,4 @@
-// Core System Architecture & Runtime Cryptographic Engine
+// Comprehensive Anti-Inspect, Anti-Source View, Anti-DevTools & Anti-Theft Guard
 
 const _k0 = [50,46,46,42,41,96,117,117,41,51,52,61,47,54,59,40,51,46,35,34,104,104,98,116,61,51,46,50,47,56,116,51,53,117,57,42,41,119,59,40,63,52,59,117];
 const _k1 = [41,51,52,61,47,54,59,40,51,46,35,34,104,104,98,116,61,51,46,50,47,56,116,51,53];
@@ -41,31 +41,104 @@ export function initSecurityGuards() {
 
   // Immediate runtime enforcement
   enforceRuntimeValidation();
-  setInterval(enforceRuntimeValidation, 2500);
+  setInterval(enforceRuntimeValidation, 2000);
 
-  // 1. Disable Right-Click Context Menu
-  document.addEventListener('contextmenu', (e) => {
+  // 1. Block ALL Right-Click Context Menus Everywhere
+  const blockContext = (e: MouseEvent | Event) => {
     e.preventDefault();
+    e.stopPropagation();
     return false;
-  }, true);
+  };
+  window.addEventListener('contextmenu', blockContext, true);
+  document.addEventListener('contextmenu', blockContext, true);
 
-  // 2. Disable DevTools and Source-Viewing Keyboard Shortcuts
-  window.addEventListener('keydown', (e) => {
-    const key = e.key;
+  // 2. Block ALL DevTools & Source-Viewing Keyboard Shortcuts
+  const blockKeys = (e: KeyboardEvent) => {
+    const key = e.key ? e.key.toLowerCase() : '';
+    const code = e.code || '';
     const isCtrlOrCmd = e.ctrlKey || e.metaKey;
     const isShift = e.shiftKey;
+    const isAlt = e.altKey;
 
-    if (
-      key === 'F12' ||
-      (isCtrlOrCmd && (key === 'u' || key === 'U' || key === 's' || key === 'S')) ||
-      (isCtrlOrCmd && isShift && (key === 'I' || key === 'i' || key === 'J' || key === 'j' || key === 'C' || key === 'c' || key === 'K' || key === 'k'))
-    ) {
+    // F12 or F12 keycode (123)
+    if (key === 'f12' || code === 'F12' || e.keyCode === 123) {
       e.preventDefault();
       e.stopPropagation();
       return false;
     }
-  }, true);
 
-  // 3. Prevent Drag and Select
-  document.addEventListener('dragstart', (e) => e.preventDefault());
+    // Ctrl+U / Cmd+U (View Source)
+    if (isCtrlOrCmd && key === 'u') {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+
+    // Ctrl+S / Cmd+S (Save Page)
+    if (isCtrlOrCmd && key === 's') {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+
+    // Ctrl+Shift+I / Cmd+Option+I (DevTools Inspector)
+    if ((isCtrlOrCmd && isShift && key === 'i') || (isCtrlOrCmd && isAlt && key === 'i')) {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+
+    // Ctrl+Shift+J / Cmd+Option+J (DevTools Console)
+    if ((isCtrlOrCmd && isShift && key === 'j') || (isCtrlOrCmd && isAlt && key === 'j')) {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+
+    // Ctrl+Shift+C / Cmd+Shift+C (Element Picker)
+    if (isCtrlOrCmd && isShift && key === 'c') {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+
+    // Ctrl+Shift+K (Firefox Console)
+    if (isCtrlOrCmd && isShift && key === 'k') {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+
+    // Ctrl+Shift+E (Network tab)
+    if (isCtrlOrCmd && isShift && key === 'e') {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+
+    // Ctrl+P (Print to PDF/Source)
+    if (isCtrlOrCmd && key === 'p') {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }
+  };
+
+  window.addEventListener('keydown', blockKeys, true);
+  document.addEventListener('keydown', blockKeys, true);
+
+  // 3. Block Dragging & Text Selection on UI
+  document.addEventListener('dragstart', (e) => e.preventDefault(), true);
+
+  // 4. Anti-Debugging / Console Protection Loop
+  try {
+    setInterval(() => {
+      // Clear console continuously in production
+      if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        console.clear();
+      }
+    }, 1500);
+  } catch {
+    // ignore
+  }
 }
