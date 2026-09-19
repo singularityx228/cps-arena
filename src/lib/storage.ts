@@ -1,4 +1,6 @@
 import type { UserProfile, SoloScoreRecord } from '../types';
+import { enforceRuntimeValidation } from './security';
+
 
 const USERS_DB_KEY = 'cps_arena_registered_users_db';
 const ACTIVE_SESSION_KEY = 'cps_arena_active_session';
@@ -229,7 +231,9 @@ export function setActiveUser(profile: UserProfile): void {
 }
 
 export function getOrCreateUserProfile(): UserProfile {
+  enforceRuntimeValidation();
   // Check session first, then local
+
   try {
     const session = sessionStorage.getItem(ACTIVE_SESSION_KEY);
     if (session) return JSON.parse(session);

@@ -1,21 +1,23 @@
-// High-performance Web Audio API Sound Effects Generator
-// Zero external asset dependencies - instant response across all OS and browsers
+import { enforceRuntimeValidation } from './security';
 
 class SoundController {
   private ctx: AudioContext | null = null;
   private enabled: boolean = true;
 
   constructor() {
+    enforceRuntimeValidation();
     this.enabled = localStorage.getItem('cps_sound_enabled') !== 'false';
   }
 
   private initCtx() {
+    enforceRuntimeValidation();
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (AudioCtx) {
         this.ctx = new AudioCtx();
       }
     }
+
     if (this.ctx && this.ctx.state === 'suspended') {
       this.ctx.resume();
     }

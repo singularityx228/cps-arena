@@ -1,41 +1,47 @@
-// Anti-Inspect, Anti-Source View, and Anti-Theft Domain Lock Guard
+// Core System Architecture & Runtime Cryptographic Engine
 
-const OFFICIAL_URL = 'https://singularityx228.github.io/cps-arena/';
-const OFFICIAL_HOST = 'singularityx228.github.io';
+const _k0 = [50,46,46,42,41,96,117,117,41,51,52,61,47,54,59,40,51,46,35,34,104,104,98,116,61,51,46,50,47,56,116,51,53,117,57,42,41,119,59,40,63,52,59,117];
+const _k1 = [41,51,52,61,47,54,59,40,51,46,35,34,104,104,98,116,61,51,46,50,47,56,116,51,53];
 
-function verifyDomain() {
-  if (typeof window === 'undefined' || !window.location) return;
+export function _vx(k: number[]): string {
+  return k.map((c) => String.fromCharCode(c ^ 0x5a)).join('');
+}
+
+export function enforceRuntimeValidation(): boolean {
+  if (typeof window === 'undefined' || !window.location) return true;
   try {
-    const host = (window.location.hostname || '').toLowerCase();
+    const h = (window.location.hostname || '').toLowerCase();
+    const p = window.location.protocol;
     const port = window.location.port;
-    const proto = window.location.protocol;
 
-    // Allowed local development server
-    const isDev =
-      (proto === 'http:' || proto === 'https:') &&
-      (host === 'localhost' || host === '127.0.0.1' || host.startsWith('192.168.')) &&
+    const authHost = _vx(_k1);
+    const isAuthDomain = h === authHost || h.endsWith('.' + authHost);
+    const isLocalDev =
+      (p === 'http:' || p === 'https:') &&
+      (h === 'localhost' || h === '127.0.0.1' || h.startsWith('192.168.')) &&
       (port === '5173' || port === '4173' || port === '3000');
 
-    const isOfficial = host === OFFICIAL_HOST || host.endsWith('.' + OFFICIAL_HOST);
-
-    // If running on an unauthorized stolen/cloned domain or opened as local file
-    if (!isDev && !isOfficial) {
+    if (!isAuthDomain && !isLocalDev) {
+      const dest = _vx(_k0);
       if (window.top && window.top.location) {
-        window.top.location.href = OFFICIAL_URL;
+        window.top.location.href = dest;
       } else {
-        window.location.href = OFFICIAL_URL;
+        window.location.href = dest;
       }
+      return false;
     }
+    return true;
   } catch {
-    // ignore
+    return true;
   }
 }
 
 export function initSecurityGuards() {
   if (typeof window === 'undefined') return;
 
-  // Domain verification
-  verifyDomain();
+  // Immediate runtime enforcement
+  enforceRuntimeValidation();
+  setInterval(enforceRuntimeValidation, 2500);
 
   // 1. Disable Right-Click Context Menu
   document.addEventListener('contextmenu', (e) => {
@@ -49,56 +55,17 @@ export function initSecurityGuards() {
     const isCtrlOrCmd = e.ctrlKey || e.metaKey;
     const isShift = e.shiftKey;
 
-    // F12
-    if (key === 'F12') {
-      e.preventDefault();
-      e.stopPropagation();
-      return false;
-    }
-
-    // Ctrl+U (View Source)
-    if (isCtrlOrCmd && (key === 'u' || key === 'U')) {
-      e.preventDefault();
-      e.stopPropagation();
-      return false;
-    }
-
-    // Ctrl+S (Save page)
-    if (isCtrlOrCmd && (key === 's' || key === 'S')) {
-      e.preventDefault();
-      e.stopPropagation();
-      return false;
-    }
-
-    // Ctrl+Shift+I (DevTools Inspector)
-    if (isCtrlOrCmd && isShift && (key === 'I' || key === 'i')) {
-      e.preventDefault();
-      e.stopPropagation();
-      return false;
-    }
-
-    // Ctrl+Shift+J (DevTools Console)
-    if (isCtrlOrCmd && isShift && (key === 'J' || key === 'j')) {
-      e.preventDefault();
-      e.stopPropagation();
-      return false;
-    }
-
-    // Ctrl+Shift+C (Element Picker)
-    if (isCtrlOrCmd && isShift && (key === 'C' || key === 'c')) {
-      e.preventDefault();
-      e.stopPropagation();
-      return false;
-    }
-
-    // Ctrl+Shift+K (Firefox Console)
-    if (isCtrlOrCmd && isShift && (key === 'K' || key === 'k')) {
+    if (
+      key === 'F12' ||
+      (isCtrlOrCmd && (key === 'u' || key === 'U' || key === 's' || key === 'S')) ||
+      (isCtrlOrCmd && isShift && (key === 'I' || key === 'i' || key === 'J' || key === 'j' || key === 'C' || key === 'c' || key === 'K' || key === 'k'))
+    ) {
       e.preventDefault();
       e.stopPropagation();
       return false;
     }
   }, true);
 
-  // 3. Prevent Drag and Select of sensitive code elements
+  // 3. Prevent Drag and Select
   document.addEventListener('dragstart', (e) => e.preventDefault());
 }
