@@ -86,11 +86,15 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
     // 2. Load top scores immediately
     refreshScores();
 
-    // 3. Connect to global real-time leaderboard feed
-    const service = new GlobalLeaderboardService((_record) => {
-      // New score received globally
-      refreshScores();
-    });
+    // 3. Connect to global real-time leaderboard feed and retained cloud state
+    const service = new GlobalLeaderboardService(
+      (_stateRecords) => {
+        refreshScores();
+      },
+      (_newScore) => {
+        refreshScores();
+      }
+    );
     service.init();
     leaderboardServiceRef.current = service;
 
@@ -98,6 +102,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
       service.disconnect();
     };
   }, [user]);
+
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-4 md:py-6 space-y-6">

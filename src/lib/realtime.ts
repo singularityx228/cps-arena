@@ -1,6 +1,7 @@
 import mqtt, { type MqttClient } from 'mqtt';
 import type { UserProfile, PlayerState } from '../types';
-import { saveLeaderboardRecord, type GlobalLeaderboardRecord } from './storage';
+import { saveLeaderboardRecord, getCachedLeaderboard, type GlobalLeaderboardRecord } from './storage';
+
 
 export interface MatchNetworkCallbacks {
   onOpponentConnected: (opponent: PlayerState, syncedDuration: number) => void;
@@ -568,16 +569,22 @@ export class MatchmakingQueueService {
 }
 
 // ----------------------------------------------------
-// Global Live Leaderboard Synchronization Service
+// Global Live Leaderboard Synchronization Service (Retained Cloud State)
 // ----------------------------------------------------
-const LEADERBOARD_TOPIC = 'cps_arena_v3/global_leaderboard_feed';
+const LEADERBOARD_STATE_TOPIC = 'cps_arena_v3/global_leaderboard_state';
+const LEADERBOARD_FEED_TOPIC = 'cps_arena_v3/global_leaderboard_feed';
 
 export class GlobalLeaderboardService {
   private client: MqttClient | null = null;
   private localBroadcast: BroadcastChannel | null = null;
+  private onStateReceived: ((records: GlobalLeaderboardRecord[]) => void) | null = null;
   private onScoreReceived: ((record: GlobalLeaderboardRecord) => void) | null = null;
 
-  constructor(onScoreReceived?: (record: GlobalLeaderboardRecord) => void) {
+  constructor(
+    onStateReceived?: (records: GlobalLeaderboardRecord[]) => void,
+    onScoreReceived?: (record: GlobalLeaderboardRecord) => void
+  ) {
+    this.onStateReceived = onStateReceived || null;
     this.onScoreReceived = onScoreReceived || null;
   }
 
@@ -587,10 +594,15 @@ export class GlobalLeaderboardService {
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
         this.localBroadcast = new BroadcastChannel('cps_arena_leaderboard_channel');
         this.localBroadcast.onmessage = (event) => {
-          const { type, payload } = event.data || {};
+          const { type, payload, records } = event.data || {};
           if (type === 'NEW_SCORE' && payload) {
             saveLeaderboardRecord(payload);
             this.onScoreReceived?.(payload);
+          } else if (type === 'STATE_UPDATE' && records) {
+            for (const r of records) {
+              saveLeaderboardRecord(r);
+            }
+            this.onStateReceived?.(records);
           }
         };
       }
@@ -598,24 +610,32 @@ export class GlobalLeaderboardService {
       // ignore
     }
 
-    // 2. MQTT WebSocket Global Feed
-    const clientId = `ldr_${Math.random().toString(36).substring(2, 9)}`;
+    // 2. MQTT WebSocket Global Feed & Retained Cloud State
+    const clientId = `ldr_${Math.random().toString(36).substring(2, 9)}_${Date.now().toString(36)}`;
     try {
       this.client = mqtt.connect(BROKER_SERVERS[0], {
         clientId,
         clean: true,
         connectTimeout: 5000,
-        reconnectPeriod: 4000,
+        reconnectPeriod: 3000,
       });
 
       this.client.on('connect', () => {
-        this.client?.subscribe(LEADERBOARD_TOPIC, { qos: 0 });
+        // Subscribe to retained state topic & live feed topic with QoS 1
+        this.client?.subscribe([LEADERBOARD_STATE_TOPIC, LEADERBOARD_FEED_TOPIC], { qos: 1 });
       });
 
-      this.client.on('message', (_top, payloadBuf) => {
+      this.client.on('message', (topic, payloadBuf) => {
         try {
           const msg = JSON.parse(payloadBuf.toString());
-          if (msg && msg.type === 'GLOBAL_SCORE_ANNOUNCE' && msg.record) {
+          if (!msg) return;
+
+          if (topic === LEADERBOARD_STATE_TOPIC && msg.records && Array.isArray(msg.records)) {
+            for (const r of msg.records) {
+              saveLeaderboardRecord(r);
+            }
+            this.onStateReceived?.(msg.records);
+          } else if (msg.type === 'GLOBAL_SCORE_ANNOUNCE' && msg.record) {
             saveLeaderboardRecord(msg.record);
             this.onScoreReceived?.(msg.record);
           }
@@ -631,16 +651,36 @@ export class GlobalLeaderboardService {
   public broadcastScore(record: GlobalLeaderboardRecord) {
     saveLeaderboardRecord(record);
 
-    const msg = {
+    // Merge and compute new global top 30 ledger
+    const currentCached = getCachedLeaderboard();
+    const map = new Map<string, GlobalLeaderboardRecord>();
+    for (const r of currentCached) {
+      map.set(r.username.toLowerCase(), r);
+    }
+    const existing = map.get(record.username.toLowerCase());
+    if (!existing || record.cps >= existing.cps) {
+      map.set(record.username.toLowerCase(), record);
+    }
+    const updatedTopList = Array.from(map.values()).sort((a, b) => b.cps - a.cps).slice(0, 30);
+
+    const statePayload = JSON.stringify({
+      type: 'LEADERBOARD_STATE',
+      updatedAt: new Date().toISOString(),
+      records: updatedTopList,
+    });
+
+    const feedPayload = JSON.stringify({
       type: 'GLOBAL_SCORE_ANNOUNCE',
       record,
-    };
-    const jsonStr = JSON.stringify(msg);
+    });
 
     if (this.client?.connected) {
-      this.client.publish(LEADERBOARD_TOPIC, jsonStr, { qos: 0 });
+      // Retained update ensures ANY new player or fresh device immediately receives the leaderboard!
+      this.client.publish(LEADERBOARD_STATE_TOPIC, statePayload, { retain: true, qos: 1 });
+      this.client.publish(LEADERBOARD_FEED_TOPIC, feedPayload, { qos: 0 });
     }
     if (this.localBroadcast) {
+      this.localBroadcast.postMessage({ type: 'STATE_UPDATE', records: updatedTopList });
       this.localBroadcast.postMessage({ type: 'NEW_SCORE', payload: record });
     }
   }
@@ -660,3 +700,4 @@ export class GlobalLeaderboardService {
     }
   }
 }
+
