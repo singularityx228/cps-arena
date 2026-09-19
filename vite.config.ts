@@ -3,30 +3,47 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import JavaScriptObfuscator from 'javascript-obfuscator'
 
-// Custom Production Obfuscation Plugin (100% scrambles JS code while preserving full functionality)
-function customObfuscatorPlugin() {
+// Advanced Production Obfuscator & HTML Flattener Plugin
+function advancedProtectionPlugin() {
   return {
-    name: 'custom-javascript-obfuscator',
+    name: 'custom-production-protection',
     enforce: 'post' as const,
     apply: 'build' as const,
+    transformIndexHtml(html: string) {
+      // Flatten & minify HTML into single line
+      return html
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/>\s+</g, '><')
+        .replace(/\s{2,}/g, ' ')
+        .trim()
+    },
     generateBundle(_options: any, bundle: any) {
       for (const fileName in bundle) {
         const chunk = bundle[fileName]
         if (chunk.type === 'chunk' && fileName.endsWith('.js')) {
-          const obfuscationResult = JavaScriptObfuscator.obfuscate(chunk.code, {
-            compact: true,
-            controlFlowFlattening: true,
-            controlFlowFlatteningThreshold: 0.4,
-            deadCodeInjection: false,
-            stringArray: true,
-            stringArrayEncoding: ['base64'],
-            stringArrayThreshold: 0.75,
-            splitStrings: true,
-            splitStringsChunkLength: 8,
-            identifierNamesGenerator: 'hexadecimal',
-            renameGlobals: false,
-          })
-          chunk.code = obfuscationResult.getObfuscatedCode()
+          try {
+            const obfuscationResult = JavaScriptObfuscator.obfuscate(chunk.code, {
+              compact: true,
+              controlFlowFlattening: true,
+              controlFlowFlatteningThreshold: 0.6,
+              deadCodeInjection: true,
+              deadCodeInjectionThreshold: 0.15,
+              stringArray: true,
+              stringArrayEncoding: ['base64', 'rc4'],
+              stringArrayThreshold: 0.85,
+              splitStrings: true,
+              splitStringsChunkLength: 6,
+              identifierNamesGenerator: 'hexadecimal',
+              transformObjectKeys: true,
+              disableConsoleOutput: true,
+              numbersToExpressions: true,
+              simplify: true,
+              unicodeEscapeSequence: false,
+            })
+            chunk.code = obfuscationResult.getObfuscatedCode()
+          } catch (e) {
+            console.warn('Obfuscation fallback for chunk:', fileName, e)
+          }
         }
       }
     },
@@ -36,9 +53,14 @@ function customObfuscatorPlugin() {
 // https://vite.dev/config/
 export default defineConfig({
   base: '/cps-arena/',
+  build: {
+    sourcemap: false,
+    cssMinify: true,
+  },
   plugins: [
     react(),
     tailwindcss(),
-    customObfuscatorPlugin(),
+    advancedProtectionPlugin(),
   ],
 })
+
