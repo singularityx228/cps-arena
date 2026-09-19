@@ -20,6 +20,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
 
   const refreshScores = async () => {
     setIsRefreshing(true);
+    globalLeaderboardService.requestPeerSync();
     const localCached = getCachedLeaderboard();
 
     // Try Supabase if configured
@@ -89,12 +90,21 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
 
     // 3. Connect and subscribe to singleton global leaderboard cloud sync
     globalLeaderboardService.init();
+    globalLeaderboardService.requestPeerSync();
+
     const unsubscribe = globalLeaderboardService.subscribe(() => {
       refreshScores();
     });
 
+    // 4. Auto refresh interval (15s) like ChronoPulse
+    const interval = setInterval(() => {
+      globalLeaderboardService.requestPeerSync();
+      refreshScores();
+    }, 15000);
+
     return () => {
       unsubscribe();
+      clearInterval(interval);
     };
   }, [user]);
 

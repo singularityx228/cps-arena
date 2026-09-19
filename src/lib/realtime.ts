@@ -1,6 +1,6 @@
 import mqtt, { type MqttClient } from 'mqtt';
 import type { UserProfile, PlayerState } from '../types';
-import { saveLeaderboardRecord, getCachedLeaderboard, type GlobalLeaderboardRecord } from './storage';
+import { saveLeaderboardRecord, getCachedLeaderboard, safeMergeLeaderboardRecords, type GlobalLeaderboardRecord } from './storage';
 
 
 export interface MatchNetworkCallbacks {
@@ -569,22 +569,31 @@ export class MatchmakingQueueService {
 }
 
 // ----------------------------------------------------
-// Global Live Leaderboard Synchronization Service (Retained Cloud State)
+// Global Live Leaderboard Synchronization Service (ChronoPulse Dual-Broker Architecture)
 // ----------------------------------------------------
-const LEADERBOARD_STATE_TOPIC = 'cps_arena_v3/global_leaderboard_state';
-const LEADERBOARD_FEED_TOPIC = 'cps_arena_v3/global_leaderboard_feed';
+const PRIMARY_BROKER = 'wss://broker.emqx.io:8084/mqtt';
+const BACKUP_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+
+const PRIMARY_RETAINED_TOPIC = 'cps_arena_v4/global/leaderboard_retained/v1';
+const BACKUP_RETAINED_TOPIC = 'cps_arena_v4/backup/leaderboard_retained/v1';
+const GOSSIP_TOPIC = 'cps_arena_v4/global/leaderboard_gossip/v1';
 
 export class GlobalLeaderboardService {
-  private client: MqttClient | null = null;
+  private primaryClient: MqttClient | null = null;
+  private backupClient: MqttClient | null = null;
   private localBroadcast: BroadcastChannel | null = null;
   private listeners: Set<() => void> = new Set();
   private pendingBroadcasts: GlobalLeaderboardRecord[] = [];
   public isConnected: boolean = false;
+  private maxSeenGlobalCount: number = 0;
+  private lastPeerSyncResponseTime: number = 0;
 
   public init() {
-    if (this.client) return; // already initialized
+    if (this.primaryClient || this.backupClient) return; // already initialized
 
-    // 1. Local Broadcast Channel
+    this.maxSeenGlobalCount = getCachedLeaderboard().length;
+
+    // 1. Cross-tab Broadcast Channel
     try {
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
         this.localBroadcast = new BroadcastChannel('cps_arena_leaderboard_channel');
@@ -593,11 +602,15 @@ export class GlobalLeaderboardService {
           if (type === 'NEW_SCORE' && payload) {
             saveLeaderboardRecord(payload);
             this.notifyListeners();
-          } else if (type === 'STATE_UPDATE' && records) {
-            for (const r of records) {
-              saveLeaderboardRecord(r);
-            }
+          } else if (type === 'STATE_UPDATE' && records && Array.isArray(records)) {
+            safeMergeLeaderboardRecords(records);
+            this.maxSeenGlobalCount = Math.max(this.maxSeenGlobalCount, records.length);
             this.notifyListeners();
+          } else if (type === 'REQUEST_LEADERBOARD_SYNC') {
+            const current = getCachedLeaderboard();
+            if (current.length > 0 && this.localBroadcast) {
+              this.localBroadcast.postMessage({ type: 'STATE_UPDATE', records: current });
+            }
           }
         };
       }
@@ -605,56 +618,139 @@ export class GlobalLeaderboardService {
       // ignore
     }
 
-    // 2. MQTT WebSocket Global Feed & Retained Cloud State
-    const clientId = `ldr_${Math.random().toString(36).substring(2, 9)}_${Date.now().toString(36)}`;
+    // 2. Primary MQTT Broker (EMQX)
+    this.initPrimaryMqtt();
+
+    // 3. Backup MQTT Broker (HiveMQ Cloud Fallback)
+    this.initBackupMqtt();
+
+    // 4. Initial Peer Sync Request after 1.5s
+    setTimeout(() => {
+      this.requestPeerSync();
+    }, 1500);
+
+    // 5. Periodic Sync interval (every 20s)
+    setInterval(() => {
+      this.requestPeerSync();
+    }, 20000);
+  }
+
+  private initPrimaryMqtt() {
     try {
-      const client = mqtt.connect(BROKER_SERVERS[0], {
+      const clientId = `cps_p_${Math.random().toString(36).substring(2, 9)}_${Date.now().toString(36)}`;
+      const client = mqtt.connect(PRIMARY_BROKER, {
         clientId,
         clean: true,
         connectTimeout: 5000,
         reconnectPeriod: 2500,
-        keepalive: 15,
+        keepalive: 30,
       });
-      this.client = client;
+      this.primaryClient = client;
 
       client.on('connect', () => {
         this.isConnected = true;
-        // Subscribe to retained state topic & live feed topic with QoS 1
-        client.subscribe([LEADERBOARD_STATE_TOPIC, LEADERBOARD_FEED_TOPIC], { qos: 1 });
+        client.subscribe([PRIMARY_RETAINED_TOPIC, BACKUP_RETAINED_TOPIC, GOSSIP_TOPIC], { qos: 1 });
 
         // Flush any pending broadcasts
-        while (this.pendingBroadcasts.length > 0) {
-          const item = this.pendingBroadcasts.shift();
-          if (item) {
-            this.broadcastScore(item);
-          }
-        }
+        this.flushPending();
+
+        // Akıllıca mevcut listeyi retained olarak senkronize et
+        this.publishLeaderboardRetained();
       });
 
       client.on('message', (topic, payloadBuf) => {
-        try {
-          const msg = JSON.parse(payloadBuf.toString());
-          if (!msg) return;
-
-          if (topic === LEADERBOARD_STATE_TOPIC && msg.records && Array.isArray(msg.records)) {
-            for (const r of msg.records) {
-              saveLeaderboardRecord(r);
-            }
-            this.notifyListeners();
-          } else if (msg.type === 'GLOBAL_SCORE_ANNOUNCE' && msg.record) {
-            saveLeaderboardRecord(msg.record);
-            this.notifyListeners();
-          }
-        } catch {
-          // ignore
-        }
+        this.handleMqttMessage(topic, payloadBuf);
       });
 
       client.on('close', () => {
-        this.isConnected = false;
+        if (!this.backupClient?.connected) {
+          this.isConnected = false;
+        }
       });
     } catch (err) {
-      console.warn('Leaderboard sync error:', err);
+      console.warn('Primary MQTT init error:', err);
+    }
+  }
+
+  private initBackupMqtt() {
+    try {
+      const clientId = `cps_b_${Math.random().toString(36).substring(2, 9)}_${Date.now().toString(36)}`;
+      const client = mqtt.connect(BACKUP_BROKER, {
+        clientId,
+        clean: true,
+        connectTimeout: 6000,
+        reconnectPeriod: 3000,
+        keepalive: 45,
+      });
+      this.backupClient = client;
+
+      client.on('connect', () => {
+        this.isConnected = true;
+        client.subscribe([PRIMARY_RETAINED_TOPIC, BACKUP_RETAINED_TOPIC, GOSSIP_TOPIC], { qos: 1 });
+        this.publishLeaderboardRetained();
+      });
+
+      client.on('message', (topic, payloadBuf) => {
+        this.handleMqttMessage(topic, payloadBuf);
+      });
+    } catch (err) {
+      console.warn('Backup MQTT init error:', err);
+    }
+  }
+
+  private handleMqttMessage(topic: string, payloadBuf: any) {
+    try {
+      const msgStr = payloadBuf.toString();
+      const parsed = JSON.parse(msgStr);
+      if (!parsed) return;
+
+      // 1. Retained list or direct state array
+      if (topic === PRIMARY_RETAINED_TOPIC || topic === BACKUP_RETAINED_TOPIC) {
+        let records: GlobalLeaderboardRecord[] = [];
+        if (Array.isArray(parsed)) {
+          records = parsed;
+        } else if (parsed.records && Array.isArray(parsed.records)) {
+          records = parsed.records;
+        }
+
+        if (records.length > 0) {
+          safeMergeLeaderboardRecords(records);
+          this.maxSeenGlobalCount = Math.max(this.maxSeenGlobalCount, records.length);
+          this.notifyListeners();
+        }
+      }
+
+      // 2. Gossip channel messages
+      if (topic === GOSSIP_TOPIC) {
+        if (parsed.type === 'GLOBAL_SCORE_ANNOUNCE' && parsed.record) {
+          safeMergeLeaderboardRecords([parsed.record]);
+          this.notifyListeners();
+        } else if (parsed.type === 'SYNC_LEADERBOARD_RECORDS' && Array.isArray(parsed.records)) {
+          safeMergeLeaderboardRecords(parsed.records);
+          this.maxSeenGlobalCount = Math.max(this.maxSeenGlobalCount, parsed.records.length);
+          this.notifyListeners();
+        } else if (parsed.type === 'REQUEST_LEADERBOARD_SYNC') {
+          // Send back our records if not sent in the last 4 seconds
+          const now = Date.now();
+          if (now - this.lastPeerSyncResponseTime > 4000) {
+            this.lastPeerSyncResponseTime = now;
+            const current = getCachedLeaderboard();
+            if (current.length > 0) {
+              const respPayload = JSON.stringify({
+                type: 'SYNC_LEADERBOARD_RECORDS',
+                records: current,
+              });
+              if (this.primaryClient?.connected) {
+                this.primaryClient.publish(GOSSIP_TOPIC, respPayload, { qos: 0 });
+              } else if (this.backupClient?.connected) {
+                this.backupClient.publish(GOSSIP_TOPIC, respPayload, { qos: 0 });
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
     }
   }
 
@@ -675,30 +771,76 @@ export class GlobalLeaderboardService {
     });
   }
 
-  public broadcastScore(record: GlobalLeaderboardRecord) {
-    saveLeaderboardRecord(record);
+  private flushPending() {
+    while (this.pendingBroadcasts.length > 0) {
+      const item = this.pendingBroadcasts.shift();
+      if (item) {
+        this.broadcastScore(item);
+      }
+    }
+  }
 
-    if (!this.client || !this.isConnected) {
+  public requestPeerSync() {
+    const syncReq = JSON.stringify({ type: 'REQUEST_LEADERBOARD_SYNC', timestamp: Date.now() });
+    try {
+      if (this.primaryClient?.connected) {
+        this.primaryClient.publish(GOSSIP_TOPIC, syncReq, { qos: 0 });
+      }
+      if (this.backupClient?.connected) {
+        this.backupClient.publish(GOSSIP_TOPIC, syncReq, { qos: 0 });
+      }
+    } catch {}
+
+    if (this.localBroadcast) {
+      try {
+        this.localBroadcast.postMessage({ type: 'REQUEST_LEADERBOARD_SYNC' });
+      } catch {}
+    }
+  }
+
+  public publishLeaderboardRetained() {
+    const recs = getCachedLeaderboard();
+    if (!recs || recs.length === 0) return; // Asla boş liste yayınlanmaz!
+
+    // Koruma kalkanı: Eğer yereldeki sayı bugüne kadar gördüğümüz global sayıdan belirgin küçükse ezme!
+    if (recs.length < this.maxSeenGlobalCount) return;
+
+    const payload = JSON.stringify({
+      type: 'LEADERBOARD_STATE',
+      updatedAt: new Date().toISOString(),
+      records: recs.slice(0, 50),
+    });
+
+    try {
+      if (this.primaryClient?.connected) {
+        this.primaryClient.publish(PRIMARY_RETAINED_TOPIC, payload, { retain: true, qos: 1 });
+        this.primaryClient.publish(BACKUP_RETAINED_TOPIC, payload, { retain: true, qos: 1 });
+      }
+    } catch {}
+
+    try {
+      if (this.backupClient?.connected) {
+        this.backupClient.publish(PRIMARY_RETAINED_TOPIC, payload, { retain: true, qos: 1 });
+        this.backupClient.publish(BACKUP_RETAINED_TOPIC, payload, { retain: true, qos: 1 });
+      }
+    } catch {}
+  }
+
+  public broadcastScore(record: GlobalLeaderboardRecord) {
+    safeMergeLeaderboardRecords([record]);
+
+    if (!this.isConnected) {
       this.pendingBroadcasts.push(record);
       this.init();
     }
 
-    // Merge and compute new global top 30 ledger
-    const currentCached = getCachedLeaderboard();
-    const map = new Map<string, GlobalLeaderboardRecord>();
-    for (const r of currentCached) {
-      map.set(r.username.toLowerCase(), r);
-    }
-    const existing = map.get(record.username.toLowerCase());
-    if (!existing || record.cps >= existing.cps) {
-      map.set(record.username.toLowerCase(), record);
-    }
-    const updatedTopList = Array.from(map.values()).sort((a, b) => b.cps - a.cps).slice(0, 30);
+    const updatedTopList = getCachedLeaderboard();
+    this.maxSeenGlobalCount = Math.max(this.maxSeenGlobalCount, updatedTopList.length);
 
     const statePayload = JSON.stringify({
       type: 'LEADERBOARD_STATE',
       updatedAt: new Date().toISOString(),
-      records: updatedTopList,
+      records: updatedTopList.slice(0, 50),
     });
 
     const feedPayload = JSON.stringify({
@@ -706,15 +848,32 @@ export class GlobalLeaderboardService {
       record,
     });
 
-    if (this.client?.connected) {
-      // Retained update ensures ANY new player or fresh device immediately receives the leaderboard!
-      this.client.publish(LEADERBOARD_STATE_TOPIC, statePayload, { retain: true, qos: 1 });
-      this.client.publish(LEADERBOARD_FEED_TOPIC, feedPayload, { qos: 0 });
-    }
+    // 1. Publish to Primary MQTT
+    try {
+      if (this.primaryClient?.connected) {
+        this.primaryClient.publish(PRIMARY_RETAINED_TOPIC, statePayload, { retain: true, qos: 1 });
+        this.primaryClient.publish(BACKUP_RETAINED_TOPIC, statePayload, { retain: true, qos: 1 });
+        this.primaryClient.publish(GOSSIP_TOPIC, feedPayload, { qos: 1 });
+      }
+    } catch {}
+
+    // 2. Publish to Backup MQTT (HiveMQ)
+    try {
+      if (this.backupClient?.connected) {
+        this.backupClient.publish(PRIMARY_RETAINED_TOPIC, statePayload, { retain: true, qos: 1 });
+        this.backupClient.publish(BACKUP_RETAINED_TOPIC, statePayload, { retain: true, qos: 1 });
+        this.backupClient.publish(GOSSIP_TOPIC, feedPayload, { qos: 1 });
+      }
+    } catch {}
+
+    // 3. Local BroadcastChannel
     if (this.localBroadcast) {
-      this.localBroadcast.postMessage({ type: 'STATE_UPDATE', records: updatedTopList });
-      this.localBroadcast.postMessage({ type: 'NEW_SCORE', payload: record });
+      try {
+        this.localBroadcast.postMessage({ type: 'STATE_UPDATE', records: updatedTopList });
+        this.localBroadcast.postMessage({ type: 'NEW_SCORE', payload: record });
+      } catch {}
     }
+
     this.notifyListeners();
   }
 }

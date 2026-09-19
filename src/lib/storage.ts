@@ -96,21 +96,52 @@ export function getCachedLeaderboard(): GlobalLeaderboardRecord[] {
 
 export function saveLeaderboardRecord(record: GlobalLeaderboardRecord): void {
   try {
-    const current = getCachedLeaderboard();
-    const existingIdx = current.findIndex((r) => r.username.toLowerCase() === record.username.toLowerCase());
-    if (existingIdx !== -1) {
-      if (record.cps >= current[existingIdx].cps) {
-        current[existingIdx] = record;
-      }
-    } else {
-      current.push(record);
-    }
-    current.sort((a, b) => b.cps - a.cps);
-    localStorage.setItem(GLOBAL_LEADERBOARD_KEY, JSON.stringify(current.slice(0, 50)));
+    safeMergeLeaderboardRecords([record]);
   } catch (err) {
     console.error('Failed to cache leaderboard record:', err);
   }
 }
+
+export function safeMergeLeaderboardRecords(incoming: GlobalLeaderboardRecord[]): GlobalLeaderboardRecord[] {
+  if (!Array.isArray(incoming) || incoming.length === 0) return getCachedLeaderboard();
+
+  const current = getCachedLeaderboard();
+  const map = new Map<string, GlobalLeaderboardRecord>();
+
+  // 1. Existing
+  for (const r of current) {
+    if (r && r.username) {
+      map.set(r.username.toLowerCase(), r);
+    }
+  }
+
+  // 2. Incoming
+  for (const r of incoming) {
+    if (r && r.username) {
+      const key = r.username.toLowerCase();
+      const existing = map.get(key);
+      if (!existing || Number(r.cps) >= Number(existing.cps)) {
+        map.set(key, {
+          id: r.id || existing?.id || 'rec_' + Math.random().toString(36).substring(2, 9),
+          username: r.username,
+          cps: Number(r.cps),
+          duration: Number(r.duration) || 5,
+          tier_text: r.tier_text || (r.cps >= 13 ? 'I AM BETTER' : r.cps >= 9.01 ? 'AFERİN LA' : r.cps >= 8 ? 'GÜZEL' : 'ÇIK SİTEDEN BİR DAHA GELME'),
+          created_at: r.created_at || new Date().toISOString(),
+        });
+      }
+    }
+  }
+
+  const merged = Array.from(map.values()).sort((a, b) => b.cps - a.cps).slice(0, 50);
+  try {
+    localStorage.setItem(GLOBAL_LEADERBOARD_KEY, JSON.stringify(merged));
+  } catch (err) {
+    console.error('Failed to save merged leaderboard:', err);
+  }
+  return merged;
+}
+
 
 
 // ----------------------------------------------------
