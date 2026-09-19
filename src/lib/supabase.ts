@@ -49,6 +49,7 @@ export function getSupabaseClient(): SupabaseClient | null {
 
 // ----------------------------------------------------
 // Realtime 1v1 Room & Match Manager
+// (Uses Supabase Realtime + Local BroadcastChannel fallback)
 // ----------------------------------------------------
 
 export interface MatchCallbacks {
@@ -61,13 +62,13 @@ export interface MatchCallbacks {
 
 export class VersusChannelManager {
   private channel: RealtimeChannel | null = null;
+  private localBroadcast: BroadcastChannel | null = null;
   private roomId: string;
   public isConnected: boolean = false;
   private callbacks: MatchCallbacks | null = null;
-  private isSimulated: boolean = false;
 
   constructor(roomId: string) {
-    this.roomId = roomId;
+    this.roomId = roomId.toUpperCase().trim();
   }
 
   public connect(
@@ -77,26 +78,14 @@ export class VersusChannelManager {
     callbacks: MatchCallbacks
   ): boolean {
     this.callbacks = callbacks;
-    const client = getSupabaseClient();
 
-    if (!client) {
-      // Offline / Simulated Match Mode
-      this.isSimulated = true;
-      this.isConnected = true;
-      return true;
-    }
-
+    // 1. Initialize Cross-Tab Local Broadcast Channel for instant offline/local testing
     try {
-      this.channel = client.channel(`room_${this.roomId}`, {
-        config: {
-          broadcast: { self: false },
-          presence: { key: currentUser.id },
-        },
-      });
-
-      this.channel
-        .on('broadcast', { event: 'player_joined' }, ({ payload }) => {
-          if (payload && payload.user) {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        this.localBroadcast = new BroadcastChannel(`cps_room_${this.roomId}`);
+        this.localBroadcast.onmessage = (event) => {
+          const { type, payload } = event.data || {};
+          if (type === 'player_joined' && isHost && payload?.user?.id !== currentUser.id) {
             this.callbacks?.onPlayerJoined({
               id: payload.user.id,
               username: payload.user.username,
@@ -105,89 +94,160 @@ export class VersusChannelManager {
               hasStarted: false,
               hasFinished: false,
             });
-          }
-        })
-        .on('broadcast', { event: 'player_start' }, ({ payload }) => {
-          this.callbacks?.onOpponentStart(payload.startTime);
-        })
-        .on('broadcast', { event: 'click_update' }, ({ payload }) => {
-          if (payload && payload.player) {
+            // Acknowledge back to guest
+            this.localBroadcast?.postMessage({
+              type: 'host_ack',
+              payload: { host: currentUser },
+            });
+          } else if (type === 'host_ack' && !isHost && payload?.host?.id !== currentUser.id) {
+            this.callbacks?.onPlayerJoined({
+              id: payload.host.id,
+              username: payload.host.username,
+              clicks: 0,
+              cps: 0,
+              hasStarted: false,
+              hasFinished: false,
+            });
+          } else if (type === 'player_start' && payload?.senderId !== currentUser.id) {
+            this.callbacks?.onOpponentStart(payload.startTime);
+          } else if (type === 'click_update' && payload?.senderId !== currentUser.id && payload?.player) {
             this.callbacks?.onOpponentClickUpdate(payload.player);
-          }
-        })
-        .on('broadcast', { event: 'player_finish' }, ({ payload }) => {
-          if (payload) {
+          } else if (type === 'player_finish' && payload?.senderId !== currentUser.id) {
             this.callbacks?.onOpponentFinish(payload);
+          } else if (type === 'rematch' && payload?.senderId !== currentUser.id) {
+            this.callbacks?.onRematchRequested();
           }
-        })
-        .on('broadcast', { event: 'rematch' }, () => {
-          this.callbacks?.onRematchRequested();
-        });
+        };
 
-      this.channel.subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          this.isConnected = true;
-          // If joining, notify host
-          if (!isHost) {
-            this.channel?.send({
-              type: 'broadcast',
-              event: 'player_joined',
+        // If guest joining, announce to host
+        if (!isHost) {
+          setTimeout(() => {
+            this.localBroadcast?.postMessage({
+              type: 'player_joined',
               payload: { user: currentUser, matchDuration },
             });
-          }
+          }, 200);
         }
-      });
-
-      return true;
+      }
     } catch (err) {
-      console.warn('Realtime channel error, switching to simulated mode:', err);
-      this.isSimulated = true;
-      this.isConnected = true;
-      return true;
+      console.warn('BroadcastChannel error:', err);
     }
+
+    // 2. Initialize Supabase Realtime Channel
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        this.channel = client.channel(`room_${this.roomId}`, {
+          config: {
+            broadcast: { self: false },
+            presence: { key: currentUser.id },
+          },
+        });
+
+        this.channel
+          .on('broadcast', { event: 'player_joined' }, ({ payload }) => {
+            if (payload && payload.user && payload.user.id !== currentUser.id) {
+              this.callbacks?.onPlayerJoined({
+                id: payload.user.id,
+                username: payload.user.username,
+                clicks: 0,
+                cps: 0,
+                hasStarted: false,
+                hasFinished: false,
+              });
+            }
+          })
+          .on('broadcast', { event: 'player_start' }, ({ payload }) => {
+            this.callbacks?.onOpponentStart(payload.startTime);
+          })
+          .on('broadcast', { event: 'click_update' }, ({ payload }) => {
+            if (payload && payload.player) {
+              this.callbacks?.onOpponentClickUpdate(payload.player);
+            }
+          })
+          .on('broadcast', { event: 'player_finish' }, ({ payload }) => {
+            if (payload) {
+              this.callbacks?.onOpponentFinish(payload);
+            }
+          })
+          .on('broadcast', { event: 'rematch' }, () => {
+            this.callbacks?.onRematchRequested();
+          });
+
+        this.channel.subscribe(async (status) => {
+          if (status === 'SUBSCRIBED') {
+            this.isConnected = true;
+            if (!isHost) {
+              this.channel?.send({
+                type: 'broadcast',
+                event: 'player_joined',
+                payload: { user: currentUser, matchDuration },
+              });
+            }
+          }
+        });
+      } catch (err) {
+        console.warn('Supabase Realtime error:', err);
+      }
+    }
+
+    this.isConnected = true;
+    return true;
   }
 
-  public broadcastStart(startTime: number) {
-    if (this.channel && !this.isSimulated) {
-      this.channel.send({
-        type: 'broadcast',
-        event: 'player_start',
-        payload: { startTime },
-      });
-    }
+  public broadcastStart(startTime: number, senderId: string) {
+    this.localBroadcast?.postMessage({
+      type: 'player_start',
+      payload: { startTime, senderId },
+    });
+    this.channel?.send({
+      type: 'broadcast',
+      event: 'player_start',
+      payload: { startTime, senderId },
+    });
   }
 
-  public broadcastClicks(player: PlayerState) {
-    if (this.channel && !this.isSimulated) {
-      this.channel.send({
-        type: 'broadcast',
-        event: 'click_update',
-        payload: { player },
-      });
-    }
+  public broadcastClicks(player: PlayerState, senderId: string) {
+    this.localBroadcast?.postMessage({
+      type: 'click_update',
+      payload: { player, senderId },
+    });
+    this.channel?.send({
+      type: 'broadcast',
+      event: 'click_update',
+      payload: { player, senderId },
+    });
   }
 
-  public broadcastFinish(clicks: number, cps: number, timedOut: boolean = false) {
-    if (this.channel && !this.isSimulated) {
-      this.channel.send({
-        type: 'broadcast',
-        event: 'player_finish',
-        payload: { clicks, cps, timedOut },
-      });
-    }
+  public broadcastFinish(clicks: number, cps: number, timedOut: boolean = false, senderId: string = '') {
+    this.localBroadcast?.postMessage({
+      type: 'player_finish',
+      payload: { clicks, cps, timedOut, senderId },
+    });
+    this.channel?.send({
+      type: 'broadcast',
+      event: 'player_finish',
+      payload: { clicks, cps, timedOut, senderId },
+    });
   }
 
-  public broadcastRematch() {
-    if (this.channel && !this.isSimulated) {
-      this.channel.send({
-        type: 'broadcast',
-        event: 'rematch',
-        payload: {},
-      });
-    }
+  public broadcastRematch(senderId: string) {
+    this.localBroadcast?.postMessage({
+      type: 'rematch',
+      payload: { senderId },
+    });
+    this.channel?.send({
+      type: 'broadcast',
+      event: 'rematch',
+      payload: { senderId },
+    });
   }
 
   public disconnect() {
+    if (this.localBroadcast) {
+      this.localBroadcast.close();
+      this.localBroadcast = null;
+    }
     if (this.channel) {
       const client = getSupabaseClient();
       client?.removeChannel(this.channel);

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Swords, Plus, LogIn, Bot, Sparkles, Zap, AlertCircle } from 'lucide-react';
+import { Swords, Plus, LogIn, Bot, Sparkles, Zap, AlertCircle, Hash, X, Check } from 'lucide-react';
 import type { UserProfile, VersusMatch } from '../types';
 import { VersusBattleRoom } from './VersusBattleRoom';
 import { sounds } from '../lib/sounds';
@@ -21,60 +21,49 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
   const [joinError, setJoinError] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
 
+  // Custom Room Creation Modal
+  const [isCreateRoomModalOpen, setIsCreateRoomModalOpen] = useState<boolean>(false);
+  const [customRoomNumber, setCustomRoomNumber] = useState<string>('');
+  const [createError, setCreateError] = useState<string>('');
+
   // Helper to generate random 1 - 7 seconds match duration
   const generateRandomDuration = (): number => {
-    // Random between 1 and 7 seconds (e.g. 1, 2, 3, 4, 5, 6, 7)
     return Math.floor(Math.random() * 7) + 1;
   };
 
-  // Helper to generate 6-digit room code
-  const generateRoomCode = (): string => {
+  // Helper to generate 6-digit random room code
+  const generateRandomRoomCode = (): string => {
     return Math.floor(100000 + Math.random() * 900000).toString();
   };
 
-  // Quick Matchmaking
-  const handleQuickMatch = () => {
-    setIsSearching(true);
+  // Open Room Creation Modal
+  const handleOpenCreateModal = () => {
     sounds.playClick();
-
-    // Fast simulated search or instant match creation
-    setTimeout(() => {
-      setIsSearching(false);
-      const matchDuration = generateRandomDuration();
-      const roomId = generateRoomCode();
-
-      const newMatch: VersusMatch = {
-        roomId,
-        roomName: `Arena #${roomId}`,
-        duration: matchDuration,
-        startWindowSeconds: 10,
-        createdAt: Date.now(),
-        startWindowExpiresAt: Date.now() + 10000,
-        status: 'ready',
-        player1: {
-          id: user.id,
-          username: user.username,
-          clicks: 0,
-          cps: 0,
-          hasStarted: false,
-          hasFinished: false,
-        },
-      };
-
-      setIsBotMatch(false);
-      setCurrentMatch(newMatch);
-    }, 1200);
+    setCustomRoomNumber(generateRandomRoomCode());
+    setCreateError('');
+    setIsCreateRoomModalOpen(true);
   };
 
-  // Create Private Room
-  const handleCreateRoom = () => {
+  // Confirm Custom Room Creation
+  const handleConfirmCreateRoom = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanRoomCode = customRoomNumber.trim().toUpperCase();
+    if (cleanRoomCode.length < 2) {
+      setCreateError('Oda numarası en az 2 karakter olmalıdır.');
+      return;
+    }
+    if (cleanRoomCode.length > 12) {
+      setCreateError('Oda numarası en fazla 12 karakter olabilir.');
+      return;
+    }
+
     sounds.playClick();
+    setIsCreateRoomModalOpen(false);
     const matchDuration = generateRandomDuration();
-    const roomId = generateRoomCode();
 
     const newMatch: VersusMatch = {
-      roomId,
-      roomName: `Özel Oda #${roomId}`,
+      roomId: cleanRoomCode,
+      roomName: `Özel Oda #${cleanRoomCode}`,
       duration: matchDuration,
       startWindowSeconds: 10,
       createdAt: Date.now(),
@@ -94,11 +83,44 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     setCurrentMatch(newMatch);
   };
 
+  // Quick Matchmaking
+  const handleQuickMatch = () => {
+    setIsSearching(true);
+    sounds.playClick();
+
+    setTimeout(() => {
+      setIsSearching(false);
+      const matchDuration = generateRandomDuration();
+      const roomId = generateRandomRoomCode();
+
+      const newMatch: VersusMatch = {
+        roomId,
+        roomName: `Arena #${roomId}`,
+        duration: matchDuration,
+        startWindowSeconds: 10,
+        createdAt: Date.now(),
+        startWindowExpiresAt: Date.now() + 10000,
+        status: 'waiting',
+        player1: {
+          id: user.id,
+          username: user.username,
+          clicks: 0,
+          cps: 0,
+          hasStarted: false,
+          hasFinished: false,
+        },
+      };
+
+      setIsBotMatch(false);
+      setCurrentMatch(newMatch);
+    }, 1000);
+  };
+
   // Join Room with Code
   const handleJoinRoom = (e: React.FormEvent) => {
     e.preventDefault();
-    const code = joinCode.trim();
-    if (code.length < 4) {
+    const code = joinCode.trim().toUpperCase();
+    if (code.length < 2) {
       setJoinError('Lütfen geçerli bir oda kodu girin.');
       return;
     }
@@ -199,7 +221,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
               KAPIŞMA ARENASI
             </h1>
             <p className="text-sm md:text-base text-gray-300 max-w-lg leading-relaxed">
-              Her maçta sistem <strong className="text-yellow-400">1 ile 7 saniye</strong> arasında rastgele bir kapışma süresi belirler. <strong className="text-rose-400">10 saniyelik başlama penceresinde</strong> istediğin an tıkla ve rakibini ez!
+              Odanı kur ve arkadaşına oda numaranı ver! Rakip odaya girdiği an <strong className="text-yellow-400">"RAKİP BULUNDU"</strong> 3 saniyelik geri sayımı başlar, ardından <strong className="text-rose-400">1-7 saniyelik</strong> kapışmada en hızlı olan kazanır!
             </p>
           </div>
 
@@ -217,6 +239,27 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
 
       {/* Main Mode Options */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Create Private Room with Custom Room Number */}
+        <div className="bg-[#111426] border border-gray-800 hover:border-purple-500/50 rounded-2xl p-5 flex flex-col justify-between transition-all group shadow-lg">
+          <div className="space-y-3">
+            <div className="w-12 h-12 rounded-xl bg-purple-600/20 border border-purple-500/40 flex items-center justify-center text-purple-400 group-hover:scale-110 transition-transform">
+              <Plus className="w-6 h-6" />
+            </div>
+            <h3 className="text-lg font-black text-white">Özel Oda Kur</h3>
+            <p className="text-xs text-gray-400 leading-relaxed">
+              İstediğin oda numarasını belirle ve arkadaşını özel 1v1 maçına davet et.
+            </p>
+          </div>
+
+          <button
+            onClick={handleOpenCreateModal}
+            className="mt-5 w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-sm shadow-[0_0_20px_rgba(168,85,247,0.4)] transition-all flex items-center justify-center space-x-2"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Oda Numarası Belirle & Kur</span>
+          </button>
+        </div>
+
         {/* Quick Match */}
         <div className="bg-[#111426] border border-gray-800 hover:border-rose-500/50 rounded-2xl p-5 flex flex-col justify-between transition-all group shadow-lg">
           <div className="space-y-3">
@@ -225,7 +268,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
             </div>
             <h3 className="text-lg font-black text-white">Hızlı Eşleşme</h3>
             <p className="text-xs text-gray-400 leading-relaxed">
-              Rastgele bir rakip bul ve anında 1-7 saniyelik refleks kapışmasına başla.
+              Otomatik oda aç veya rastgele bir rakiple hemen kapışmaya başla.
             </p>
           </div>
 
@@ -235,28 +278,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
             className="mt-5 w-full py-3 rounded-xl bg-gradient-to-r from-rose-600 to-orange-600 hover:from-rose-500 hover:to-orange-500 text-white font-bold text-sm shadow-[0_0_20px_rgba(244,63,94,0.4)] transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
           >
             <Swords className="w-4 h-4" />
-            <span>{isSearching ? 'Rakip Aranıyor...' : 'Hızlı Maç Başlat'}</span>
-          </button>
-        </div>
-
-        {/* Create Private Room */}
-        <div className="bg-[#111426] border border-gray-800 hover:border-purple-500/50 rounded-2xl p-5 flex flex-col justify-between transition-all group shadow-lg">
-          <div className="space-y-3">
-            <div className="w-12 h-12 rounded-xl bg-purple-600/20 border border-purple-500/40 flex items-center justify-center text-purple-400 group-hover:scale-110 transition-transform">
-              <Plus className="w-6 h-6" />
-            </div>
-            <h3 className="text-lg font-black text-white">Özel Oda Kur</h3>
-            <p className="text-xs text-gray-400 leading-relaxed">
-              Arkadaşına oda kodunu göndererek birebir özel kapışma odası oluştur.
-            </p>
-          </div>
-
-          <button
-            onClick={handleCreateRoom}
-            className="mt-5 w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-sm shadow-[0_0_20px_rgba(168,85,247,0.4)] transition-all flex items-center justify-center space-x-2"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Oda Oluştur</span>
+            <span>{isSearching ? 'Oda Kuruluyor...' : 'Hızlı Maç Başlat'}</span>
           </button>
         </div>
 
@@ -268,7 +290,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
             </div>
             <h3 className="text-lg font-black text-white">Cyber Bot İle Pratik</h3>
             <p className="text-xs text-gray-400 leading-relaxed">
-              İnternet veya rakip beklemeden yapay zeka CyberBot ile reflekslerini geliştir.
+              Rakip beklemeden yapay zeka CyberBot ile reflekslerini test et.
             </p>
           </div>
 
@@ -286,7 +308,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
       <div className="bg-[#111426] border border-gray-800 rounded-2xl p-5 shadow-lg">
         <h3 className="text-sm font-bold text-gray-200 mb-3 flex items-center space-x-2">
           <LogIn className="w-4 h-4 text-rose-400" />
-          <span>Oda Kodu ile Katıl</span>
+          <span>Oda Numarası Yazarak Katıl</span>
         </h3>
         <form onSubmit={handleJoinRoom} className="flex flex-col sm:flex-row gap-3">
           <input
@@ -296,34 +318,111 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
               setJoinCode(e.target.value.toUpperCase());
               setJoinError('');
             }}
-            placeholder="6 Haneli Oda Kodu (Örn: 849201)"
-            maxLength={10}
-            className="flex-1 bg-[#161a32] border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 font-mono text-sm tracking-wider focus:outline-none focus:border-rose-400"
+            placeholder="Oda Numarasını Gir (Örn: 582910 veya OYUN1)"
+            maxLength={12}
+            className="flex-1 bg-[#161a32] border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 font-mono text-sm tracking-wider focus:outline-none focus:border-rose-400 uppercase font-bold"
           />
           <button
             type="submit"
-            className="px-6 py-3 rounded-xl bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white font-bold text-sm transition-all shrink-0 flex items-center justify-center space-x-2"
+            className="px-6 py-3 rounded-xl bg-gradient-to-r from-rose-600 to-orange-600 hover:from-rose-500 hover:to-orange-500 text-white font-bold text-sm transition-all shrink-0 flex items-center justify-center space-x-2 shadow-lg"
           >
-            <LogIn className="w-4 h-4 text-rose-400" />
-            <span>Odaya Bağlan</span>
+            <LogIn className="w-4 h-4" />
+            <span>Odaya Katıl</span>
           </button>
         </form>
-        {joinError && <p className="text-xs text-red-400 mt-2">{joinError}</p>}
+        {joinError && <p className="text-xs text-red-400 mt-2 font-semibold">{joinError}</p>}
       </div>
 
       {/* Rules Notice */}
       <div className="bg-rose-950/20 border border-rose-500/20 rounded-2xl p-4 text-xs text-gray-400 flex items-start space-x-3">
         <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
         <div className="space-y-1">
-          <p className="font-bold text-rose-300">1v1 Kapışma Kuralları & Başlama Mekaniği</p>
+          <p className="font-bold text-rose-300">1v1 Kapışma Akışı & Yeni Başlama Mekaniği</p>
           <p>
-            1. Eşleşme başladığında altta 10 saniyelik hazırlık sayacı çalışır.<br />
-            2. Her iki oyuncu da ekstra butona basmadan, doğrudan tıklama alanına dokundukları an kendi kapışma süreleri saymaya başlar.<br />
-            3. 10 saniye içinde hiç başlamayan oyuncu hükmen mağlup sayılır.<br />
-            4. Süre sonunda en yüksek CPS'e (virgülden sonraki hassasiyetle) ulaşan oyuncu kazanır!
+            1. Oda oluşturulduğunda rakip beklenir (tıklama alanı kilitlidir).<br />
+            2. Rakip odaya girdiği anda ekranda <strong>"RAKİP BULUNDU!"</strong> başlığıyla <strong>3 saniyelik geri sayım</strong> başlar.<br />
+            3. Geri sayım bittiğinde <strong>10 saniyelik başlama penceresi</strong> açılır; doğrudan tıklama alanına dokunduğunuz an süreniz işlemeye başlar!
           </p>
         </div>
       </div>
+
+      {/* Custom Room Creation Modal */}
+      {isCreateRoomModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
+          <div className="relative w-full max-w-md bg-[#0f1322] border border-purple-500/40 rounded-3xl p-6 shadow-[0_0_50px_rgba(168,85,247,0.3)] text-left">
+            <button
+              onClick={() => setIsCreateRoomModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-white p-1"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-purple-600/20 border border-purple-500/40 flex items-center justify-center text-purple-400">
+                <Hash className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-white tracking-wide">Oda Numarası Belirle</h3>
+                <p className="text-xs text-gray-400">Arkadaşının odaya girmesi için bir numara/kod yaz</p>
+              </div>
+            </div>
+
+            <form onSubmit={handleConfirmCreateRoom} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-2">
+                  Oda Numarası / Kodu
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={customRoomNumber}
+                    onChange={(e) => {
+                      setCustomRoomNumber(e.target.value.toUpperCase());
+                      setCreateError('');
+                    }}
+                    maxLength={12}
+                    placeholder="Örn: 123456 veya VS99"
+                    className="w-full bg-[#161b30] border border-purple-500/40 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-purple-400 font-mono text-lg font-black tracking-wider uppercase"
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setCustomRoomNumber(generateRandomRoomCode())}
+                    className="absolute right-2 top-2.5 px-2.5 py-1 text-xs bg-purple-900/50 hover:bg-purple-800 text-purple-300 rounded-lg border border-purple-500/30 transition-all font-bold"
+                  >
+                    Rastgele
+                  </button>
+                </div>
+                {createError && <p className="text-xs text-red-400 mt-1.5">{createError}</p>}
+              </div>
+
+              <div className="bg-purple-950/30 border border-purple-500/20 rounded-xl p-3 text-xs text-gray-300 space-y-1">
+                <p className="font-semibold text-purple-300">💡 Nasıl Çalışır?</p>
+                <p className="text-gray-400 leading-relaxed">
+                  Odayı oluşturduktan sonra rakip beklenir. Arkadaşın bu numarayı girdiğinde <strong>3 saniyelik "RAKİP BULUNDU"</strong> sayımı ile kapışma başlar!
+                </p>
+              </div>
+
+              <div className="flex space-x-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateRoomModalOpen(false)}
+                  className="flex-1 py-3 px-4 rounded-xl border border-gray-700 bg-gray-800/60 hover:bg-gray-700/60 text-gray-300 font-semibold text-sm transition-all"
+                >
+                  İptal
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-sm shadow-[0_0_20px_rgba(168,85,247,0.4)] transition-all flex items-center justify-center space-x-1.5"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>Odayı Aç</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
