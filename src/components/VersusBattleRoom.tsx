@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Swords, Trophy, Clock, Zap, AlertTriangle, RotateCcw, Bot, User, CheckCircle2, Copy, Check, ShieldAlert, Loader2 } from 'lucide-react';
+import { Swords, Trophy, Clock, Zap, AlertTriangle, RotateCcw, Bot, User, CheckCircle2, Copy, Check, ShieldAlert, Loader2, Signal } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import type { UserProfile, PlayerState, VersusMatch } from '../types';
 import { getEvaluation } from '../types';
 import { recordMatchResult } from '../lib/storage';
 import { sounds } from '../lib/sounds';
-import { VersusChannelManager } from '../lib/supabase';
+import { UniversalMatchEngine } from '../lib/realtime';
 
 interface VersusBattleRoomProps {
   match: VersusMatch;
@@ -24,37 +24,47 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
   onUserUpdate,
   addParticles,
 }) => {
-  // Room Phase: 'waiting' (waiting for opponent) | 'opponent_found' (3s countdown) | 'active' (10s start window / clicking) | 'finished'
   const isHost = match.player1.id === currentUser.id;
-  const initialOpponent = match.player2 || (isBotMatch ? {
-    id: 'bot_cyber',
-    username: 'CyberBot_X9',
-    clicks: 0,
-    cps: 0,
-    hasStarted: false,
-    hasFinished: false,
-  } : null);
+  const [matchDuration, setMatchDuration] = useState<number>(match.duration);
 
-  const [opponent, setOpponent] = useState<PlayerState | null>(initialOpponent);
+  // Network & Room Status
+  const [statusMessage, setStatusMessage] = useState<string>('Sunucuya bağlanılıyor...');
+  const [networkError, setNetworkError] = useState<string>('');
+
+  // Opponent State
+  const [opponent, setOpponent] = useState<PlayerState | null>(
+    isBotMatch
+      ? {
+          id: 'bot_cyber',
+          username: 'CyberBot_X9',
+          clicks: 0,
+          cps: 0,
+          hasStarted: false,
+          hasFinished: false,
+        }
+      : null
+  );
+
+  // Phases: 'waiting' | 'found_countdown' | 'active' | 'finished'
   const [phase, setPhase] = useState<'waiting' | 'found_countdown' | 'active' | 'finished'>(
-    initialOpponent ? 'found_countdown' : 'waiting'
+    isBotMatch ? 'found_countdown' : 'waiting'
   );
 
   // 3-Second "RAKİP BULUNDU" Countdown
   const [foundCountdown, setFoundCountdown] = useState<number>(3);
 
-  // Player 1 (Local) and Player 2 (Opponent) states
+  // Local Player Match State
   const [myClicks, setMyClicks] = useState<number>(0);
   const [myCps, setMyCps] = useState<number>(0);
   const [hasMyMatchStarted, setHasMyMatchStarted] = useState<boolean>(false);
   const [hasMyMatchFinished, setHasMyMatchFinished] = useState<boolean>(false);
-  const [myTimeRemaining, setMyTimeRemaining] = useState<number>(match.duration);
+  const [myTimeRemaining, setMyTimeRemaining] = useState<number>(matchDuration);
 
   // 10-Second Start Window Timer (Hazırlık Sayacı)
   const [startWindowTimeLeft, setStartWindowTimeLeft] = useState<number>(10.0);
   const [isTimedOut, setIsTimedOut] = useState<boolean>(false);
 
-  // Match Outcome
+  // Outcome
   const [isMatchOver, setIsMatchOver] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [winnerInfo, setWinnerInfo] = useState<{
@@ -64,51 +74,67 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
     reason: string;
   } | null>(null);
 
-  // Refs for precise time calculations
+  // Precise timing refs
   const myStartTimeRef = useRef<number | null>(null);
   const myClicksRef = useRef<number>(0);
   const myTimerRef = useRef<number | null>(null);
   const startWindowTimerRef = useRef<number | null>(null);
   const foundCountdownIntervalRef = useRef<number | null>(null);
-  const channelManagerRef = useRef<VersusChannelManager | null>(null);
+  const engineRef = useRef<UniversalMatchEngine | null>(null);
   const botClickTimerRef = useRef<number | null>(null);
 
-  // 1. Initialize Connection
+  // 1. Initialize Universal Match Engine
   useEffect(() => {
     if (!isBotMatch) {
-      channelManagerRef.current = new VersusChannelManager(match.roomId);
-      channelManagerRef.current.connect(
+      engineRef.current = new UniversalMatchEngine(
+        match.roomId,
         currentUser,
         isHost,
-        match.duration,
+        matchDuration,
         {
-          onPlayerJoined: (p2) => {
-            setOpponent(p2);
-            triggerOpponentFoundCountdown();
+          onOpponentConnected: (opp, syncedDuration) => {
+            setOpponent(opp);
+            if (syncedDuration && syncedDuration > 0) {
+              setMatchDuration(syncedDuration);
+              setMyTimeRemaining(syncedDuration);
+            }
+            startFoundCountdown();
           },
           onOpponentStart: () => {
-            setOpponent((prev) => prev ? { ...prev, hasStarted: true } : null);
+            setOpponent((prev) => (prev ? { ...prev, hasStarted: true } : null));
           },
-          onOpponentClickUpdate: (player) => {
-            setOpponent((prev) => prev ? { ...prev, clicks: player.clicks, cps: player.cps } : null);
+          onOpponentClickUpdate: (opp) => {
+            setOpponent((prev) => (prev ? { ...prev, clicks: opp.clicks, cps: opp.cps } : null));
           },
           onOpponentFinish: (result) => {
-            setOpponent((prev) => prev ? {
-              ...prev,
-              clicks: result.clicks,
-              cps: result.cps,
-              hasFinished: true,
-              timedOut: result.timedOut,
-            } : null);
+            setOpponent((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    clicks: result.clicks,
+                    cps: result.cps,
+                    hasFinished: true,
+                    timedOut: result.timedOut,
+                  }
+                : null
+            );
           },
           onRematchRequested: () => {
             onLeaveRoom();
           },
+          onConnectionError: (err) => {
+            setNetworkError(err);
+          },
+          onStatusChange: (status) => {
+            setStatusMessage(status);
+          },
         }
       );
+
+      engineRef.current.init();
     } else {
-      // Bot match starts countdown immediately
-      triggerOpponentFoundCountdown();
+      // Bot matches trigger countdown immediately
+      startFoundCountdown();
     }
 
     return () => {
@@ -116,17 +142,19 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
       if (startWindowTimerRef.current) clearInterval(startWindowTimerRef.current);
       if (myTimerRef.current) clearInterval(myTimerRef.current);
       if (botClickTimerRef.current) clearInterval(botClickTimerRef.current);
-      channelManagerRef.current?.disconnect();
+      engineRef.current?.disconnect();
     };
   }, []);
 
-  // 2. Trigger 3-Second "RAKİP BULUNDU" Countdown
-  const triggerOpponentFoundCountdown = () => {
+  // 2. 3-Second "RAKİP BULUNDU" Countdown
+  const startFoundCountdown = () => {
     setPhase('found_countdown');
     setFoundCountdown(3);
     sounds.playTick(true);
 
     let count = 3;
+    if (foundCountdownIntervalRef.current) clearInterval(foundCountdownIntervalRef.current);
+
     foundCountdownIntervalRef.current = window.setInterval(() => {
       count -= 1;
       setFoundCountdown(count);
@@ -139,13 +167,12 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
           clearInterval(foundCountdownIntervalRef.current);
           foundCountdownIntervalRef.current = null;
         }
-        // Start Active Phase & 10s Window
         startActivePhase();
       }
     }, 1000);
   };
 
-  // 3. Start Active Phase (10s Start Window)
+  // 3. Active Phase (10s Start Window)
   const startActivePhase = () => {
     setPhase('active');
     const startWindowStart = performance.now();
@@ -164,7 +191,6 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
       }
     }, 50);
 
-    // If bot, schedule bot click
     if (isBotMatch) {
       const botDelay = 800 + Math.random() * 3000;
       setTimeout(() => {
@@ -173,38 +199,46 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
     }
   };
 
-  // Bot click simulation
+  // Bot Click Simulation
   const startBotClicking = () => {
-    setOpponent((prev) => prev ? { ...prev, hasStarted: true } : null);
-    const targetBotCps = 8.0 + Math.random() * 5.5; // Bot does 8 - 13.5 CPS
+    setOpponent((prev) => (prev ? { ...prev, hasStarted: true } : null));
+    const targetBotCps = 8.0 + Math.random() * 5.5;
     const botIntervalMs = 1000 / targetBotCps;
     let botClicks = 0;
     const botStart = performance.now();
 
     botClickTimerRef.current = window.setInterval(() => {
       const elapsedSec = (performance.now() - botStart) / 1000;
-      if (elapsedSec >= match.duration) {
+      if (elapsedSec >= matchDuration) {
         if (botClickTimerRef.current) clearInterval(botClickTimerRef.current);
-        const finalBotCps = Number((botClicks / match.duration).toFixed(2));
-        setOpponent((prev) => prev ? {
-          ...prev,
-          clicks: botClicks,
-          cps: finalBotCps,
-          hasFinished: true,
-        } : null);
+        const finalBotCps = Number((botClicks / matchDuration).toFixed(2));
+        setOpponent((prev) =>
+          prev
+            ? {
+                ...prev,
+                clicks: botClicks,
+                cps: finalBotCps,
+                hasFinished: true,
+              }
+            : null
+        );
         return;
       }
       botClicks += 1;
       const curBotCps = Number((botClicks / elapsedSec).toFixed(2));
-      setOpponent((prev) => prev ? {
-        ...prev,
-        clicks: botClicks,
-        cps: curBotCps,
-      } : null);
+      setOpponent((prev) =>
+        prev
+          ? {
+              ...prev,
+              clicks: botClicks,
+              cps: curBotCps,
+            }
+          : null
+      );
     }, botIntervalMs);
   };
 
-  // 10-Second Start Window Expired
+  // 10s Window Expired
   const handleStartWindowExpired = () => {
     if (startWindowTimerRef.current) {
       clearInterval(startWindowTimerRef.current);
@@ -215,7 +249,7 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
       setIsTimedOut(true);
       setHasMyMatchFinished(true);
       sounds.playDefeat();
-      channelManagerRef.current?.broadcastFinish(0, 0, true, currentUser.id);
+      engineRef.current?.broadcastPlayerFinish(0, 0, true);
     }
   };
 
@@ -228,16 +262,16 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
 
     setHasMyMatchStarted(true);
     myStartTimeRef.current = performance.now();
-    channelManagerRef.current?.broadcastStart(Date.now(), currentUser.id);
+    engineRef.current?.broadcastPlayerStart(Date.now());
 
     myTimerRef.current = window.setInterval(() => {
       if (!myStartTimeRef.current) return;
       const elapsed = (performance.now() - myStartTimeRef.current) / 1000;
-      const remaining = Math.max(0, match.duration - elapsed);
+      const remaining = Math.max(0, matchDuration - elapsed);
       setMyTimeRemaining(remaining);
 
       if (elapsed > 0.2) {
-        const curCps = Number(((myClicksRef.current / elapsed)).toFixed(2));
+        const curCps = Number((myClicksRef.current / elapsed).toFixed(2));
         setMyCps(curCps);
       }
 
@@ -255,12 +289,12 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
     }
 
     const finalTotalClicks = myClicksRef.current;
-    const finalCalculatedCps = Number((finalTotalClicks / match.duration).toFixed(2));
+    const finalCalculatedCps = Number((finalTotalClicks / matchDuration).toFixed(2));
     setMyCps(finalCalculatedCps);
     setMyTimeRemaining(0);
     setHasMyMatchFinished(true);
 
-    channelManagerRef.current?.broadcastFinish(finalTotalClicks, finalCalculatedCps, false, currentUser.id);
+    engineRef.current?.broadcastPlayerFinish(finalTotalClicks, finalCalculatedCps, false);
   };
 
   // Check and evaluate match finish
@@ -335,7 +369,6 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
       e.preventDefault();
     }
 
-    // Locked if in waiting or countdown phase
     if (phase === 'waiting' || phase === 'found_countdown') return;
     if (hasMyMatchFinished || isTimedOut) return;
 
@@ -347,14 +380,7 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
     setMyClicks(myClicksRef.current);
     sounds.playClick(1.0 + (myClicksRef.current % 10) * 0.04);
 
-    channelManagerRef.current?.broadcastClicks({
-      id: currentUser.id,
-      username: currentUser.username,
-      clicks: myClicksRef.current,
-      cps: myCps,
-      hasStarted: true,
-      hasFinished: false,
-    }, currentUser.id);
+    engineRef.current?.broadcastPlayerClicks(myClicksRef.current, myCps);
 
     let clientX = window.innerWidth / 3;
     let clientY = window.innerHeight / 2;
@@ -397,9 +423,10 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
                 {copiedCode ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
               </button>
             </div>
-            <p className="text-xs text-gray-400">
-              {isBotMatch ? 'Cyber AI Antrenman Modu' : 'Canlı 1v1 Kapışma'}
-            </p>
+            <div className="flex items-center space-x-1.5 text-xs text-gray-400 mt-0.5">
+              <Signal className="w-3 h-3 text-emerald-400 animate-pulse" />
+              <span>{statusMessage}</span>
+            </div>
           </div>
         </div>
 
@@ -408,7 +435,7 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
           <div className="px-4 py-2 rounded-xl bg-[#161a30] border border-rose-500/40 text-center">
             <span className="text-[10px] uppercase font-bold text-gray-400 block">KAPIŞMA SÜRESİ</span>
             <span className="text-lg font-black text-amber-400 font-['Orbitron']">
-              ⚡ {match.duration} SANİYE
+              ⚡ {matchDuration} SANİYE
             </span>
           </div>
 
@@ -420,6 +447,13 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
           </button>
         </div>
       </div>
+
+      {networkError && (
+        <div className="bg-red-950/80 border border-red-500 rounded-2xl p-3 text-xs text-red-300 font-bold flex items-center justify-between">
+          <span>{networkError}</span>
+          <button onClick={() => setNetworkError('')} className="underline text-white ml-2">Kapat</button>
+        </div>
+      )}
 
       {/* PHASE 1: WAITING FOR OPPONENT */}
       {phase === 'waiting' && (
@@ -433,14 +467,14 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
               RAKİP BEKLENİYOR...
             </h2>
             <p className="text-sm text-gray-300 max-w-md mx-auto">
-              Arkadaşına aşağıdaki oda numarasını ver. Odaya girdiği anda 3 saniyelik geri sayım ile maç başlayacak!
+              {isHost ? 'Arkadaşına aşağıdaki oda numarasını ver. Odaya girdiği anda otomatik olarak 3 saniyelik geri sayım başlayacak!' : 'Oda kurucusuna bağlanılıyor, lütfen bekleyin...'}
             </p>
           </div>
 
           {/* Big Copyable Room Code Card */}
           <div className="max-w-xs mx-auto bg-black/50 border-2 border-dashed border-purple-400 rounded-2xl p-4 flex items-center justify-between">
             <div className="text-left">
-              <span className="text-[10px] font-bold uppercase text-gray-400 block">Oda Numaran</span>
+              <span className="text-[10px] font-bold uppercase text-gray-400 block">Oda Numarası</span>
               <span className="text-2xl font-black font-mono text-purple-300">{match.roomId}</span>
             </div>
             <button
@@ -454,7 +488,7 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
 
           <div className="text-xs text-purple-400 font-medium flex items-center justify-center space-x-2">
             <ShieldAlert className="w-4 h-4 text-purple-400 shrink-0" />
-            <span>Rakip gelene kadar tıklama alanı kilitlidir.</span>
+            <span>Rakip bağlanana kadar tıklama alanı kilitlidir.</span>
           </div>
         </div>
       )}
@@ -510,7 +544,7 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
         </div>
       )}
 
-      {/* Head-to-Head Split Arena (Always visible when active or finished) */}
+      {/* Head-to-Head Split Arena */}
       {phase !== 'waiting' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Left Column: YOU */}
@@ -571,7 +605,7 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
               {phase === 'active' && !hasMyMatchStarted && !hasMyMatchFinished && (
                 <div className="text-center pointer-events-none">
                   <span className="text-2xl font-black text-white block">TIKLA VE BAŞLA!</span>
-                  <span className="text-xs text-rose-300 font-medium">Dokunduğun an {match.duration}s başlar</span>
+                  <span className="text-xs text-rose-300 font-medium">Dokunduğun an {matchDuration}s başlar</span>
                 </div>
               )}
 
@@ -656,17 +690,19 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
 
       {/* Match Result Overlay / Box */}
       {isMatchOver && winnerInfo && opponent && (
-        <div className={`rounded-3xl p-6 border-2 text-center shadow-2xl animate-fade-in ${
-          winnerInfo.winnerId === currentUser.id
-            ? 'bg-gradient-to-b from-amber-950/80 via-purple-950/80 to-[#101324] border-amber-400 shadow-[0_0_50px_rgba(251,191,36,0.3)]'
-            : winnerInfo.isTie
-            ? 'bg-[#15192c] border-gray-600'
-            : 'bg-gradient-to-b from-rose-950/80 via-gray-950 to-[#101324] border-rose-600'
-        }`}>
+        <div
+          className={`rounded-3xl p-6 border-2 text-center shadow-2xl animate-fade-in ${
+            winnerInfo.winnerId === currentUser.id
+              ? 'bg-gradient-to-b from-amber-950/80 via-purple-950/80 to-[#101324] border-amber-400 shadow-[0_0_50px_rgba(251,191,36,0.3)]'
+              : winnerInfo.isTie
+              ? 'bg-[#15192c] border-gray-600'
+              : 'bg-gradient-to-b from-rose-950/80 via-gray-950 to-[#101324] border-rose-600'
+          }`}
+        >
           <div className="max-w-xl mx-auto space-y-3">
             <div className="inline-flex items-center space-x-2 px-4 py-1.5 rounded-full bg-black/40 border border-white/20 text-xs font-black uppercase tracking-wider">
               <Trophy className="w-4 h-4 text-yellow-400" />
-              <span>MAÇ SONUCU ({match.duration}sn Kapışma)</span>
+              <span>MAÇ SONUCU ({matchDuration}sn Kapışma)</span>
             </div>
 
             <h2 className="text-3xl md:text-5xl font-black font-['Orbitron'] text-white">
@@ -677,22 +713,28 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
             <div className="bg-black/50 border border-gray-700/60 rounded-2xl p-4 flex items-center justify-around">
               <div className="text-center">
                 <span className="text-xs text-gray-400 block font-bold">{currentUser.username} (Sen)</span>
-                <span className={`text-2xl font-black font-['Orbitron'] ${winnerInfo.winnerId === currentUser.id ? 'text-amber-400' : 'text-gray-300'}`}>
+                <span
+                  className={`text-2xl font-black font-['Orbitron'] ${
+                    winnerInfo.winnerId === currentUser.id ? 'text-amber-400' : 'text-gray-300'
+                  }`}
+                >
                   {myCps.toFixed(2)} CPS
                 </span>
               </div>
               <div className="text-lg font-black text-rose-500">VS</div>
               <div className="text-center">
                 <span className="text-xs text-gray-400 block font-bold">{opponent.username}</span>
-                <span className={`text-2xl font-black font-['Orbitron'] ${winnerInfo.winnerId === opponent.id ? 'text-amber-400' : 'text-gray-300'}`}>
+                <span
+                  className={`text-2xl font-black font-['Orbitron'] ${
+                    winnerInfo.winnerId === opponent.id ? 'text-amber-400' : 'text-gray-300'
+                  }`}
+                >
                   {opponent.cps.toFixed(2)} CPS
                 </span>
               </div>
             </div>
 
-            <p className="text-xs md:text-sm text-gray-300 font-medium">
-              {winnerInfo.reason}
-            </p>
+            <p className="text-xs md:text-sm text-gray-300 font-medium">{winnerInfo.reason}</p>
 
             <div className="pt-2">
               <span className={`text-sm font-black ${myEval.textColor}`}>
