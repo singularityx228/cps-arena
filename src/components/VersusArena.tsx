@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { Swords, Plus, LogIn, Bot, Sparkles, Zap, Hash, X, Check } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Swords, Plus, LogIn, Bot, Sparkles, Zap, Hash, X, Check, Loader2 } from 'lucide-react';
+import mqtt, { type MqttClient } from 'mqtt';
 import type { UserProfile, VersusMatch } from '../types';
 import { VersusBattleRoom } from './VersusBattleRoom';
 import { sounds } from '../lib/sounds';
@@ -10,6 +11,9 @@ interface VersusArenaProps {
   addParticles: (x: number, y: number, text: string, color: string) => void;
 }
 
+const QUEUE_TOPIC = 'cps_arena_v2/global_matchmaking_queue';
+const BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
+
 export const VersusArena: React.FC<VersusArenaProps> = ({
   user,
   onUserUpdate,
@@ -19,24 +23,181 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
   const [isBotMatch, setIsBotMatch] = useState<boolean>(false);
   const [joinCode, setJoinCode] = useState<string>('');
   const [joinError, setJoinError] = useState<string>('');
-  const [isSearching, setIsSearching] = useState<boolean>(false);
 
   // Custom Room Creation Modal
   const [isCreateRoomModalOpen, setIsCreateRoomModalOpen] = useState<boolean>(false);
   const [customRoomNumber, setCustomRoomNumber] = useState<string>('');
   const [createError, setCreateError] = useState<string>('');
 
+  // Queue State
+  const [isQueueActive, setIsQueueActive] = useState<boolean>(false);
+  const [queueTime, setQueueTime] = useState<number>(0);
+  const queueClientRef = useRef<MqttClient | null>(null);
+  const queueIntervalRef = useRef<number | null>(null);
+  const queueTimerRef = useRef<number | null>(null);
+
   // Helper to generate random 1 - 7 seconds match duration
   const generateRandomDuration = (): number => {
     return Math.floor(Math.random() * 7) + 1;
   };
 
-  // Helper to generate 6-digit random room code
   const generateRandomRoomCode = (): string => {
     return Math.floor(100000 + Math.random() * 900000).toString();
   };
 
-  // Open Room Creation Modal
+  // ----------------------------------------------------
+  // Matchmaking Queue System
+  // ----------------------------------------------------
+  const handleEnterQueue = () => {
+    sounds.playClick();
+    setIsQueueActive(true);
+    setQueueTime(0);
+
+    const startTime = Date.now();
+    queueTimerRef.current = window.setInterval(() => {
+      setQueueTime(Math.floor((Date.now() - startTime) / 1000));
+    }, 1000);
+
+    const clientId = `queue_${user.id}_${Math.floor(Math.random() * 10000)}`;
+
+    try {
+      const client = mqtt.connect(BROKER_URL, {
+        clientId,
+        clean: true,
+        connectTimeout: 5000,
+      });
+      queueClientRef.current = client;
+
+      client.on('connect', () => {
+        client.subscribe(QUEUE_TOPIC, { qos: 0 });
+
+        // Announce presence in queue every 1s
+        queueIntervalRef.current = window.setInterval(() => {
+          client.publish(
+            QUEUE_TOPIC,
+            JSON.stringify({
+              type: 'QUEUE_WAITING',
+              user,
+              timestamp: Date.now(),
+            })
+          );
+        }, 1200);
+      });
+
+      client.on('message', (_top, payloadBuf) => {
+        try {
+          const msg = JSON.parse(payloadBuf.toString());
+          if (!msg) return;
+
+          // If another player is waiting in queue and not self
+          if (msg.type === 'QUEUE_WAITING' && msg.user?.id !== user.id) {
+            // Found a waiting player -> Initiate Match as Host
+            const matchedRoomId = `Q_${generateRandomRoomCode()}`;
+            const matchDuration = generateRandomDuration();
+
+            // Broadcast MATCH_CREATED
+            client.publish(
+              QUEUE_TOPIC,
+              JSON.stringify({
+                type: 'QUEUE_MATCH_CREATED',
+                roomId: matchedRoomId,
+                duration: matchDuration,
+                targetUserId: msg.user.id,
+                hostUser: user,
+                guestUser: msg.user,
+              })
+            );
+
+            // Clean queue and enter match as host
+            handleLeaveQueue();
+
+            setCurrentMatch({
+              roomId: matchedRoomId,
+              roomName: `Sıra Maçı #${matchedRoomId}`,
+              isHost: true,
+              duration: matchDuration,
+              startWindowSeconds: 10,
+              createdAt: Date.now(),
+              startWindowExpiresAt: Date.now() + 10000,
+              status: 'waiting',
+              player1: {
+                id: user.id,
+                username: user.username,
+                clicks: 0,
+                cps: 0,
+                hasStarted: false,
+                hasFinished: false,
+              },
+              player2: {
+                id: msg.user.id,
+                username: msg.user.username,
+                clicks: 0,
+                cps: 0,
+                hasStarted: false,
+                hasFinished: false,
+              },
+            });
+          }
+
+          // If another player matched us
+          if (msg.type === 'QUEUE_MATCH_CREATED' && msg.targetUserId === user.id) {
+            handleLeaveQueue();
+
+            setCurrentMatch({
+              roomId: msg.roomId,
+              roomName: `Sıra Maçı #${msg.roomId}`,
+              isHost: false, // guest
+              duration: msg.duration,
+              startWindowSeconds: 10,
+              createdAt: Date.now(),
+              startWindowExpiresAt: Date.now() + 10000,
+              status: 'waiting',
+              player1: {
+                id: user.id,
+                username: user.username,
+                clicks: 0,
+                cps: 0,
+                hasStarted: false,
+                hasFinished: false,
+              },
+              player2: {
+                id: msg.hostUser.id,
+                username: msg.hostUser.username,
+                clicks: 0,
+                cps: 0,
+                hasStarted: false,
+                hasFinished: false,
+              },
+            });
+          }
+        } catch {
+          // ignore parse error
+        }
+      });
+    } catch (e) {
+      console.warn('Queue error:', e);
+    }
+  };
+
+  const handleLeaveQueue = () => {
+    if (queueIntervalRef.current) clearInterval(queueIntervalRef.current);
+    if (queueTimerRef.current) clearInterval(queueTimerRef.current);
+    if (queueClientRef.current) {
+      queueClientRef.current.end(true);
+      queueClientRef.current = null;
+    }
+    setIsQueueActive(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      handleLeaveQueue();
+    };
+  }, []);
+
+  // ----------------------------------------------------
+  // Room Creation & Joining
+  // ----------------------------------------------------
   const handleOpenCreateModal = () => {
     sounds.playClick();
     setCustomRoomNumber(generateRandomRoomCode());
@@ -44,7 +205,6 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     setIsCreateRoomModalOpen(true);
   };
 
-  // Confirm Custom Room Creation (HOST)
   const handleConfirmCreateRoom = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanRoomCode = customRoomNumber.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
@@ -64,7 +224,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     const newMatch: VersusMatch = {
       roomId: cleanRoomCode,
       roomName: `Özel Oda #${cleanRoomCode}`,
-      isHost: true, // EXPLICIT HOST
+      isHost: true,
       duration: matchDuration,
       startWindowSeconds: 10,
       createdAt: Date.now(),
@@ -84,41 +244,6 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     setCurrentMatch(newMatch);
   };
 
-  // Quick Matchmaking (HOST)
-  const handleQuickMatch = () => {
-    setIsSearching(true);
-    sounds.playClick();
-
-    setTimeout(() => {
-      setIsSearching(false);
-      const matchDuration = generateRandomDuration();
-      const roomId = generateRandomRoomCode();
-
-      const newMatch: VersusMatch = {
-        roomId,
-        roomName: `Arena #${roomId}`,
-        isHost: true, // EXPLICIT HOST
-        duration: matchDuration,
-        startWindowSeconds: 10,
-        createdAt: Date.now(),
-        startWindowExpiresAt: Date.now() + 10000,
-        status: 'waiting',
-        player1: {
-          id: user.id,
-          username: user.username,
-          clicks: 0,
-          cps: 0,
-          hasStarted: false,
-          hasFinished: false,
-        },
-      };
-
-      setIsBotMatch(false);
-      setCurrentMatch(newMatch);
-    }, 800);
-  };
-
-  // Join Room with Code (GUEST)
   const handleJoinRoom = (e: React.FormEvent) => {
     e.preventDefault();
     const code = joinCode.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
@@ -131,8 +256,8 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     const newMatch: VersusMatch = {
       roomId: code,
       roomName: `Oda #${code}`,
-      isHost: false, // EXPLICIT GUEST
-      duration: 5, // Will be synced from Host
+      isHost: false, // guest
+      duration: 5, // synced from host
       startWindowSeconds: 10,
       createdAt: Date.now(),
       startWindowExpiresAt: Date.now() + 10000,
@@ -151,7 +276,6 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     setCurrentMatch(newMatch);
   };
 
-  // Practice vs AI Cyber Bot
   const handlePlayVsBot = () => {
     sounds.playClick();
     const matchDuration = generateRandomDuration();
@@ -216,7 +340,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
               KAPIŞMA ARENASI
             </h1>
             <p className="text-sm md:text-base text-gray-300 max-w-lg leading-relaxed">
-              Odanı kur ve arkadaşına oda numaranı ver! Rakip odaya girdiği an <strong className="text-yellow-400">"RAKİP BULUNDU"</strong> 3 saniyelik geri sayımı başlar, ardından <strong className="text-rose-400">1-7 saniyelik</strong> kapışmada en hızlı olan kazanır!
+              Hızlı eşleşmeye basıp sıraya girin veya özel oda kurup arkadaşınızı davet edin! İki oyuncu buluştuğu anda <strong className="text-yellow-400">"RAKİP BULUNDU!"</strong> sayımı ve <strong className="text-rose-400">1-7 saniyelik</strong> kapışma başlar!
             </p>
           </div>
 
@@ -234,6 +358,27 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
 
       {/* Main Mode Options */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Quick Matchmaking (Queue) */}
+        <div className="bg-[#111426] border border-gray-800 hover:border-rose-500/50 rounded-2xl p-5 flex flex-col justify-between transition-all group shadow-lg">
+          <div className="space-y-3">
+            <div className="w-12 h-12 rounded-xl bg-rose-600/20 border border-rose-500/40 flex items-center justify-center text-rose-400 group-hover:scale-110 transition-transform">
+              <Zap className="w-6 h-6" />
+            </div>
+            <h3 className="text-lg font-black text-white">Hızlı Eşleşme (Sıraya Gir)</h3>
+            <p className="text-xs text-gray-400 leading-relaxed">
+              Tek tıkla sıraya girin. Başka bir oyuncu sıraya girdiği an otomatik olarak maça başlayın!
+            </p>
+          </div>
+
+          <button
+            onClick={handleEnterQueue}
+            className="mt-5 w-full py-3 rounded-xl bg-gradient-to-r from-rose-600 to-orange-600 hover:from-rose-500 hover:to-orange-500 text-white font-bold text-sm shadow-[0_0_20px_rgba(244,63,94,0.4)] transition-all flex items-center justify-center space-x-2"
+          >
+            <Swords className="w-4 h-4" />
+            <span>Sıraya Gir & Rakip Bul</span>
+          </button>
+        </div>
+
         {/* Create Private Room with Custom Room Number */}
         <div className="bg-[#111426] border border-gray-800 hover:border-purple-500/50 rounded-2xl p-5 flex flex-col justify-between transition-all group shadow-lg">
           <div className="space-y-3">
@@ -242,7 +387,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
             </div>
             <h3 className="text-lg font-black text-white">Özel Oda Kur</h3>
             <p className="text-xs text-gray-400 leading-relaxed">
-              İstediğin oda numarasını belirle ve arkadaşını özel 1v1 maçına davet et.
+              İstediğiniz oda numarasını belirleyin ve arkadaşınızı özel 1v1 maçına davet edin.
             </p>
           </div>
 
@@ -255,28 +400,6 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
           </button>
         </div>
 
-        {/* Quick Match */}
-        <div className="bg-[#111426] border border-gray-800 hover:border-rose-500/50 rounded-2xl p-5 flex flex-col justify-between transition-all group shadow-lg">
-          <div className="space-y-3">
-            <div className="w-12 h-12 rounded-xl bg-rose-600/20 border border-rose-500/40 flex items-center justify-center text-rose-400 group-hover:scale-110 transition-transform">
-              <Zap className="w-6 h-6" />
-            </div>
-            <h3 className="text-lg font-black text-white">Hızlı Eşleşme</h3>
-            <p className="text-xs text-gray-400 leading-relaxed">
-              Otomatik oda aç ve hızlı kapışma için rakibini bekle.
-            </p>
-          </div>
-
-          <button
-            onClick={handleQuickMatch}
-            disabled={isSearching}
-            className="mt-5 w-full py-3 rounded-xl bg-gradient-to-r from-rose-600 to-orange-600 hover:from-rose-500 hover:to-orange-500 text-white font-bold text-sm shadow-[0_0_20px_rgba(244,63,94,0.4)] transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
-          >
-            <Swords className="w-4 h-4" />
-            <span>{isSearching ? 'Oda Kuruluyor...' : 'Hızlı Maç Başlat'}</span>
-          </button>
-        </div>
-
         {/* Practice vs AI Bot */}
         <div className="bg-[#111426] border border-gray-800 hover:border-cyan-500/50 rounded-2xl p-5 flex flex-col justify-between transition-all group shadow-lg">
           <div className="space-y-3">
@@ -285,7 +408,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
             </div>
             <h3 className="text-lg font-black text-white">Cyber Bot İle Pratik</h3>
             <p className="text-xs text-gray-400 leading-relaxed">
-              Rakip beklemeden yapay zeka CyberBot ile reflekslerini test et.
+              Rakip beklemeden yapay zeka CyberBot ile reflekslerinizi test edin.
             </p>
           </div>
 
@@ -328,6 +451,47 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
         {joinError && <p className="text-xs text-red-400 mt-2 font-semibold">{joinError}</p>}
       </div>
 
+      {/* Matchmaking Queue Modal */}
+      {isQueueActive && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
+          <div className="relative w-full max-w-md bg-[#0f1324] border-2 border-rose-500/60 rounded-3xl p-8 text-center shadow-[0_0_60px_rgba(244,63,94,0.3)] space-y-5">
+            <div className="w-20 h-20 rounded-3xl bg-rose-600/20 border-2 border-rose-500 flex items-center justify-center mx-auto shadow-[0_0_30px_rgba(244,63,94,0.4)] animate-pulse">
+              <Loader2 className="w-10 h-10 text-rose-400 animate-spin" />
+            </div>
+
+            <div className="space-y-2">
+              <h2 className="text-2xl md:text-3xl font-black font-['Orbitron'] text-white">
+                SIRADASINIZ...
+              </h2>
+              <p className="text-sm text-gray-300">
+                Rakip aranıyor! Başka bir oyuncu sıraya girdiği an maç başlayacak.
+              </p>
+            </div>
+
+            <div className="bg-black/50 border border-gray-800 rounded-2xl p-4 flex items-center justify-around">
+              <div>
+                <span className="text-[10px] text-gray-400 uppercase font-bold block">Geçen Süre</span>
+                <span className="text-2xl font-black text-rose-400 font-['Orbitron']">{queueTime}s</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-gray-400 uppercase font-bold block">Durum</span>
+                <span className="text-xs font-bold text-emerald-400 flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block"></span>
+                  <span>Eşleşme Aktif</span>
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleLeaveQueue}
+              className="w-full py-3 rounded-xl bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white font-bold text-sm transition-all"
+            >
+              Sıradan Ayrıl
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Custom Room Creation Modal */}
       {isCreateRoomModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
@@ -345,7 +509,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
               </div>
               <div>
                 <h3 className="text-xl font-bold text-white tracking-wide">Oda Numarası Belirle</h3>
-                <p className="text-xs text-gray-400">Arkadaşının odaya girmesi için bir numara/kod yaz</p>
+                <p className="text-xs text-gray-400">Arkadaşınızın odaya girmesi için bir numara/kod yazın</p>
               </div>
             </div>
 
@@ -381,7 +545,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
               <div className="bg-purple-950/30 border border-purple-500/20 rounded-xl p-3 text-xs text-gray-300 space-y-1">
                 <p className="font-semibold text-purple-300">💡 Nasıl Çalışır?</p>
                 <p className="text-gray-400 leading-relaxed">
-                  Odayı oluşturduktan sonra rakip beklenir. Arkadaşın bu numarayı girdiğinde <strong>3 saniyelik "RAKİP BULUNDU"</strong> sayımı ile kapışma başlar!
+                  Odayı oluşturduktan sonra rakip beklenir. Arkadaşınız bu numarayı girdiğinde <strong>3 saniyelik "RAKİP BULUNDU"</strong> sayımı ile kapışma başlar!
                 </p>
               </div>
 

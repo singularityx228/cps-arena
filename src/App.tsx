@@ -1,23 +1,29 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
 import { SoloCpsTest } from './components/SoloCpsTest';
 import { VersusArena } from './components/VersusArena';
 import { Leaderboard } from './components/Leaderboard';
-import { UsernameModal } from './components/UsernameModal';
+import { AuthModal } from './components/AuthModal';
 import { SupabaseConfigModal } from './components/SupabaseConfigModal';
 import { ClickEffects } from './components/ClickEffects';
 import type { ClickParticle } from './components/ClickEffects';
 import { getOrCreateUserProfile } from './lib/storage';
 import { sounds } from './lib/sounds';
+import { initSecurityGuards } from './lib/security';
 import type { UserProfile } from './types';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<'solo' | 'versus' | 'leaderboard'>('solo');
   const [user, setUser] = useState<UserProfile>(getOrCreateUserProfile());
   const [soundEnabled, setSoundEnabled] = useState<boolean>(sounds.isEnabled());
-  const [isUsernameModalOpen, setIsUsernameModalOpen] = useState<boolean>(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState<boolean>(false);
   const [particles, setParticles] = useState<ClickParticle[]>([]);
+
+  // Initialize Anti-Inspect / Anti-DevTools Security Guards
+  useEffect(() => {
+    initSecurityGuards();
+  }, []);
 
   // Sound toggle handler
   const handleToggleSound = () => {
@@ -35,7 +41,7 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#080a12] text-gray-100 cyber-grid flex flex-col justify-between selection:bg-purple-600 selection:text-white">
+    <div className="min-h-screen bg-[#080a12] text-gray-100 cyber-grid flex flex-col justify-between selection:bg-purple-600 selection:text-white select-none">
       {/* Click Particles Effect Layer */}
       <ClickEffects particles={particles} />
 
@@ -46,7 +52,7 @@ export function App() {
         user={user}
         soundEnabled={soundEnabled}
         onToggleSound={handleToggleSound}
-        onOpenUsernameModal={() => setIsUsernameModalOpen(true)}
+        onOpenUsernameModal={() => setIsAuthModalOpen(true)}
         onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
       />
 
@@ -90,11 +96,11 @@ export function App() {
         </div>
       </footer>
 
-      {/* Modals */}
-      <UsernameModal
-        isOpen={isUsernameModalOpen}
+      {/* Authentication & Profile Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
         currentUser={user}
-        onClose={() => setIsUsernameModalOpen(false)}
+        onClose={() => setIsAuthModalOpen(false)}
         onUpdated={(u) => setUser(u)}
       />
 
