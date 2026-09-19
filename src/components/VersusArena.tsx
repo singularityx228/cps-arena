@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Swords, Plus, LogIn, Bot, Sparkles, Zap, AlertCircle, Hash, X, Check } from 'lucide-react';
+import { Swords, Plus, LogIn, Bot, Sparkles, Zap, Hash, X, Check } from 'lucide-react';
 import type { UserProfile, VersusMatch } from '../types';
 import { VersusBattleRoom } from './VersusBattleRoom';
 import { sounds } from '../lib/sounds';
@@ -44,10 +44,10 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     setIsCreateRoomModalOpen(true);
   };
 
-  // Confirm Custom Room Creation
+  // Confirm Custom Room Creation (HOST)
   const handleConfirmCreateRoom = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanRoomCode = customRoomNumber.trim().toUpperCase();
+    const cleanRoomCode = customRoomNumber.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
     if (cleanRoomCode.length < 2) {
       setCreateError('Oda numarası en az 2 karakter olmalıdır.');
       return;
@@ -64,6 +64,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     const newMatch: VersusMatch = {
       roomId: cleanRoomCode,
       roomName: `Özel Oda #${cleanRoomCode}`,
+      isHost: true, // EXPLICIT HOST
       duration: matchDuration,
       startWindowSeconds: 10,
       createdAt: Date.now(),
@@ -83,7 +84,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     setCurrentMatch(newMatch);
   };
 
-  // Quick Matchmaking
+  // Quick Matchmaking (HOST)
   const handleQuickMatch = () => {
     setIsSearching(true);
     sounds.playClick();
@@ -96,6 +97,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
       const newMatch: VersusMatch = {
         roomId,
         roomName: `Arena #${roomId}`,
+        isHost: true, // EXPLICIT HOST
         duration: matchDuration,
         startWindowSeconds: 10,
         createdAt: Date.now(),
@@ -113,13 +115,13 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
 
       setIsBotMatch(false);
       setCurrentMatch(newMatch);
-    }, 1000);
+    }, 800);
   };
 
-  // Join Room with Code
+  // Join Room with Code (GUEST)
   const handleJoinRoom = (e: React.FormEvent) => {
     e.preventDefault();
-    const code = joinCode.trim().toUpperCase();
+    const code = joinCode.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
     if (code.length < 2) {
       setJoinError('Lütfen geçerli bir oda kodu girin.');
       return;
@@ -129,6 +131,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     const newMatch: VersusMatch = {
       roomId: code,
       roomName: `Oda #${code}`,
+      isHost: false, // EXPLICIT GUEST
       duration: 5, // Will be synced from Host
       startWindowSeconds: 10,
       createdAt: Date.now(),
@@ -157,6 +160,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
     const newMatch: VersusMatch = {
       roomId,
       roomName: `AI Bot Arena`,
+      isHost: true,
       duration: matchDuration,
       startWindowSeconds: 10,
       createdAt: Date.now(),
@@ -259,7 +263,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
             </div>
             <h3 className="text-lg font-black text-white">Hızlı Eşleşme</h3>
             <p className="text-xs text-gray-400 leading-relaxed">
-              Otomatik oda aç veya rastgele bir rakiple hemen kapışmaya başla.
+              Otomatik oda aç ve hızlı kapışma için rakibini bekle.
             </p>
           </div>
 
@@ -322,19 +326,6 @@ export const VersusArena: React.FC<VersusArenaProps> = ({
           </button>
         </form>
         {joinError && <p className="text-xs text-red-400 mt-2 font-semibold">{joinError}</p>}
-      </div>
-
-      {/* Rules Notice */}
-      <div className="bg-rose-950/20 border border-rose-500/20 rounded-2xl p-4 text-xs text-gray-400 flex items-start space-x-3">
-        <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-        <div className="space-y-1">
-          <p className="font-bold text-rose-300">1v1 Kapışma Akışı & Yeni Başlama Mekaniği</p>
-          <p>
-            1. Oda oluşturulduğunda rakip beklenir (tıklama alanı kilitlidir).<br />
-            2. Rakip odaya girdiği anda ekranda <strong>"RAKİP BULUNDU!"</strong> başlığıyla <strong>3 saniyelik geri sayım</strong> başlar.<br />
-            3. Geri sayım bittiğinde <strong>10 saniyelik başlama penceresi</strong> açılır; doğrudan tıklama alanına dokunduğunuz an süreniz işlemeye başlar!
-          </p>
-        </div>
       </div>
 
       {/* Custom Room Creation Modal */}

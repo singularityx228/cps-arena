@@ -1,6 +1,7 @@
 import type { UserProfile, SoloScoreRecord } from '../types';
 
-const PROFILE_KEY = 'cps_arena_user_profile';
+const LOCAL_PROFILE_KEY = 'cps_arena_user_profile';
+const SESSION_PROFILE_KEY = 'cps_arena_session_profile';
 const SOLO_HISTORY_KEY = 'cps_arena_solo_history';
 
 // Generate fun default gaming name if none exists
@@ -10,35 +11,51 @@ const DEFAULT_NAMES = [
 ];
 
 export function getOrCreateUserProfile(): UserProfile {
+  // 1. Check current tab session first
   try {
-    const saved = localStorage.getItem(PROFILE_KEY);
-    if (saved) {
-      return JSON.parse(saved);
+    const sessionSaved = sessionStorage.getItem(SESSION_PROFILE_KEY);
+    if (sessionSaved) {
+      return JSON.parse(sessionSaved);
     }
   } catch {
-    // ignore parse error
+    // ignore
   }
 
+  // 2. Check localStorage
+  let baseProfile: UserProfile | null = null;
+  try {
+    const localSaved = localStorage.getItem(LOCAL_PROFILE_KEY);
+    if (localSaved) {
+      baseProfile = JSON.parse(localSaved);
+    }
+  } catch {
+    // ignore
+  }
+
+  // If local exists and tab has no session yet, we use a distinct tab session ID to allow multi-tab testing
+  const tabRandomId = 'user_' + Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
   const randomSuffix = Math.floor(100 + Math.random() * 900);
   const randomName = `${DEFAULT_NAMES[Math.floor(Math.random() * DEFAULT_NAMES.length)]}_${randomSuffix}`;
-  const newProfile: UserProfile = {
-    id: 'user_' + Math.random().toString(36).substring(2, 9) + Date.now().toString(36),
-    username: randomName,
-    highScoreCps: 0,
-    totalClicks: 0,
-    matchesPlayed: 0,
-    matchesWon: 0,
-    matchesLost: 0,
-    createdAt: new Date().toISOString(),
+
+  const profile: UserProfile = {
+    id: tabRandomId,
+    username: baseProfile ? baseProfile.username : randomName,
+    highScoreCps: baseProfile ? baseProfile.highScoreCps : 0,
+    totalClicks: baseProfile ? baseProfile.totalClicks : 0,
+    matchesPlayed: baseProfile ? baseProfile.matchesPlayed : 0,
+    matchesWon: baseProfile ? baseProfile.matchesWon : 0,
+    matchesLost: baseProfile ? baseProfile.matchesLost : 0,
+    createdAt: baseProfile ? baseProfile.createdAt : new Date().toISOString(),
   };
 
-  saveUserProfile(newProfile);
-  return newProfile;
+  saveUserProfile(profile);
+  return profile;
 }
 
 export function saveUserProfile(profile: UserProfile): void {
   try {
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    sessionStorage.setItem(SESSION_PROFILE_KEY, JSON.stringify(profile));
+    localStorage.setItem(LOCAL_PROFILE_KEY, JSON.stringify(profile));
   } catch (err) {
     console.error('Failed to save user profile:', err);
   }
@@ -76,7 +93,6 @@ export function recordSoloScore(cps: number, duration: number, totalClicks: numb
       date: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     };
     history.unshift(newRecord);
-    // Keep last 30 tests
     localStorage.setItem(SOLO_HISTORY_KEY, JSON.stringify(history.slice(0, 30)));
   } catch (err) {
     console.error('Failed to save solo record:', err);

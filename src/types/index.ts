@@ -103,6 +103,7 @@ export interface PlayerState {
 export interface VersusMatch {
   roomId: string;
   roomName: string;
+  isHost: boolean;
   duration: number; // Random 1 - 7 seconds
   startWindowSeconds: number; // 10 seconds to begin
   createdAt: number;

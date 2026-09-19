@@ -24,7 +24,7 @@ export const VersusBattleRoom: React.FC<VersusBattleRoomProps> = ({
   onUserUpdate,
   addParticles,
 }) => {
-  const isHost = match.player1.id === currentUser.id;
+  const isHost = match.isHost;
   const [matchDuration, setMatchDuration] = useState<number>(match.duration);
 
   // Network & Room Status

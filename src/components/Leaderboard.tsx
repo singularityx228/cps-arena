@@ -133,7 +133,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ user }) => {
             <div className="space-y-2.5">
               {topScores.map((item, idx) => {
                 const evalInfo = getEvaluation(item.cps);
-                const isMe = item.username === user.username;
+                const isMe = item.id === user.id;
 
                 return (
                   <div
