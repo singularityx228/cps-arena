@@ -130,89 +130,76 @@ export function initSecurityGuards() {
   // 3. Block Dragging & Text Selection on UI
   document.addEventListener('dragstart', (e) => e.preventDefault(), true);
 
-  // 4. Active DevTools Detection & Anti-Debugging Freeze Engine
+  // 4. Instant DevTools Detection & DOM Wipe Engine
   const isDev =
     window.location.hostname === 'localhost' ||
     window.location.hostname === '127.0.0.1' ||
     window.location.hostname.startsWith('192.168.');
 
   if (!isDev) {
-    const triggerAntiDebug = () => {
-      try {
-        (function () {
-          return false;
-        })
-          ['constructor']('debugger')
-          ['call']();
-      } catch {}
-    };
-
     let isNuked = false;
-    const onDevToolsDetected = () => {
+    const nukePageContent = () => {
+      if (isNuked) return;
+      isNuked = true;
+
       try {
         console.clear();
       } catch {}
 
-      if (!isNuked && document.body) {
-        isNuked = true;
-        try {
-          document.documentElement.innerHTML = `
-            <head><title>Access Denied</title></head>
-            <body style="background:#0a0d18;color:#ef4444;height:100vh;margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:20px;">
-              <div style="max-width:500px;background:#111426;padding:30px;border-radius:24px;border:1px solid rgba(239,68,68,0.4);box-shadow:0 0 40px rgba(239,68,68,0.2);">
-                <div style="font-size:48px;margin-bottom:12px;">🔒</div>
-                <h1 style="font-size:24px;color:#fff;margin:0 0 8px 0;font-weight:900;">GÜVENLİK KORUMASI AKTİF</h1>
-                <p style="color:#94a3b8;font-size:13px;line-height:1.6;margin:0 0 20px 0;">Geliştirici araçları (DevTools / Kaynak İnceleme) açıkken site içeriği ve kodlar gizlenir.</p>
-                <button onclick="window.location.reload()" style="padding:12px 24px;background:linear-gradient(135deg,#7c3aed,#db2777);color:#fff;border:none;border-radius:14px;font-weight:bold;cursor:pointer;font-size:14px;">Geliştirici Aracını Kapat & Yenile</button>
-              </div>
-            </body>`;
-        } catch {}
-      }
+      // If domain is unauthorized, redirect instantly
+      const isAuth = enforceRuntimeValidation();
+      if (!isAuth) return;
 
-      triggerAntiDebug();
+      try {
+        if (window.stop) window.stop();
+      } catch {}
+
+      try {
+        document.documentElement.innerHTML = `
+          <head>
+            <meta charset="UTF-8">
+            <title>Erişim Engellendi</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          </head>
+          <body style="background:#0a0d18;color:#ef4444;height:100vh;margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif;text-align:center;padding:20px;box-sizing:border-box;">
+            <div style="max-width:480px;width:100%;background:#111426;padding:32px 24px;border-radius:24px;border:1px solid rgba(239,68,68,0.4);box-shadow:0 0 50px rgba(239,68,68,0.25);">
+              <div style="font-size:52px;margin-bottom:16px;">🔒</div>
+              <h1 style="font-size:22px;color:#ffffff;margin:0 0 10px 0;font-weight:900;letter-spacing:-0.5px;">GÜVENLİK KORUMASI AKTİF</h1>
+              <p style="color:#94a3b8;font-size:13px;line-height:1.6;margin:0 0 24px 0;">Geliştirici araçları veya kaynak inceleme açıkken site içeriği ve kodlar gizlenir.</p>
+              <button onclick="window.location.reload()" style="padding:12px 28px;background:linear-gradient(135deg,#7c3aed,#db2777);color:#ffffff;border:none;border-radius:14px;font-weight:800;cursor:pointer;font-size:14px;box-shadow:0 0 20px rgba(124,58,237,0.4);transition:transform 0.15s;">Geliştirici Aracını Kapat & Yenile</button>
+            </div>
+          </body>`;
+      } catch {}
     };
 
-    // Trap 1: Console Element Getter Inspection
+    // Trap 1: Window Dimensions (Fires instantly on DevTools dock/undock)
+    const checkDimensions = () => {
+      const wDiff = window.outerWidth - window.innerWidth;
+      const hDiff = window.outerHeight - window.innerHeight;
+      if (wDiff > 160 || hDiff > 160) {
+        nukePageContent();
+      }
+    };
+    window.addEventListener('resize', checkDimensions, { passive: true });
+    setInterval(checkDimensions, 300);
+
+    // Trap 2: Console Getter Trap (Fires the microsecond DevTools console is active)
     try {
       const el = document.createElement('div');
       Object.defineProperty(el, 'id', {
         get: () => {
-          onDevToolsDetected();
+          nukePageContent();
           return '';
         },
       });
       setInterval(() => {
         console.log('%c', el);
         console.clear();
-      }, 1000);
+      }, 500);
     } catch {}
 
-    // Trap 2: Window Outer / Inner Dimension Differential
-    const checkDimensions = () => {
-      const wDiff = window.outerWidth - window.innerWidth;
-      const hDiff = window.outerHeight - window.innerHeight;
-      if (wDiff > 160 || hDiff > 160) {
-        onDevToolsDetected();
-      }
-    };
-    window.addEventListener('resize', checkDimensions);
-    setInterval(checkDimensions, 1000);
-
-    // Trap 3: Debugger Timing Delta Trap
-    setInterval(() => {
-      const t0 = performance.now();
-      triggerAntiDebug();
-      const t1 = performance.now();
-      if (t1 - t0 > 100) {
-        onDevToolsDetected();
-      }
-    }, 1500);
-
-    // Trap 4: Window Focus / Blur Re-check
-    window.addEventListener('focus', () => {
-      checkDimensions();
-      triggerAntiDebug();
-    });
+    // Trap 3: Focus / Blur Re-evaluation
+    window.addEventListener('focus', checkDimensions, { passive: true });
   }
 }
 
